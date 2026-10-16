@@ -18,7 +18,7 @@ test.afterAll(async () => {
   await Promise.all([rm(e2eDatabase, { force: true }), rm(`${e2eDatabase}.lock`, { force: true })]);
 });
 
-test("submits a fixture job and displays persisted rankings", async ({ page }) => {
+test("submits a fixture job and displays persisted rankings", async ({ page }, testInfo) => {
   await page.goto("/");
   await expect(page.getByText("CommerceScout AI").first()).toBeVisible();
   await expect(page.getByLabel("Approved source")).toHaveValue("fixture-skincare-catalog");
@@ -34,11 +34,13 @@ test("submits a fixture job and displays persisted rankings", async ({ page }) =
   await expect(page.getByText("Product ranking")).toBeVisible();
   await expect(page.getByText("Niacinamide 10% Barrier Serum")).toBeVisible();
   await expect(page.getByRole("link", { name: "CSV" })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("populated-dashboard.png"), fullPage: true });
 });
 
-test("keeps the research form usable on a narrow viewport", async ({ page }) => {
+test("keeps the research form usable on a narrow viewport", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Start research" })).toBeVisible();
   await expect(page.getByText("Evidence-backed results will appear here")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("mobile-empty-dashboard.png"), fullPage: true });
 });

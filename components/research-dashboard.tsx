@@ -1,308 +1,97 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import {
-  AlertCircle,
-  ArrowUpRight,
-  Bot,
-  CircleDollarSign,
-  Clock3,
-  Download,
-  FileSearch,
-  FlaskConical,
-  LoaderCircle,
-  Play,
-  Radar,
-  ShieldCheck,
-  Sparkles,
-  Square,
-} from "lucide-react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { AlertCircle, ArrowUpRight, Bot, CheckCircle2, ChevronRight, CircleDollarSign, Clock3, Download, FileSearch, FlaskConical, History, LayoutDashboard, ListChecks, LoaderCircle, Play, Radar, ShieldCheck, Sparkles, Square, Target, TriangleAlert, XCircle } from "lucide-react";
+import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-import type { ResearchJob } from "@/lib/jobs/contracts";
+import type { PersistedEvent, ResearchJob } from "@/lib/jobs/contracts";
 import type { ProductCandidate, SourceDescriptor } from "@/lib/research/contracts";
 import type { ProductEvaluation } from "@/lib/scoring/score-product";
 import { cn } from "@/lib/utils";
-
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
+import { type ChartConfig, ChartContainer } from "./ui/chart";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
+import { Select } from "./ui/select";
+import { Textarea } from "./ui/textarea";
 
-type SourceResponse = {
-  mode: "fixtures" | "live";
-  liveAgentAvailable: boolean;
-  sources: SourceDescriptor[];
-};
-
-type ReportResponse = {
-  job: ResearchJob;
-  report: { report: { mode: "deterministic_fixture" | "claude_agent"; limitations: string[] } };
-  products: Array<{ product: ProductCandidate; evaluation: ProductEvaluation | null }>;
-};
-
-type FormState = {
-  niche: "skincare" | "beauty" | "electronics";
-  minimumPrice: string;
-  maximumPrice: string;
-  requestedProductCount: string;
-  objective: string;
-  sourceId: string;
-};
+type RuntimeState = "deterministic_fixture" | "claude_agent" | "live_agent_blocked";
+type SourceResponse = { mode: "fixtures" | "live"; runtime: RuntimeState; liveAgentAvailable: boolean; sources: SourceDescriptor[] };
+type ReportResponse = { job: ResearchJob; report: { report: { mode: "deterministic_fixture" | "claude_agent"; limitations: string[] } }; products: Array<{ product: ProductCandidate; evaluation: ProductEvaluation | null }> };
+type FormState = { niche: "skincare" | "beauty" | "electronics"; minimumPrice: string; maximumPrice: string; requestedProductCount: string; objective: string; sourceId: string };
 
 const terminalStatuses = new Set(["completed", "partial", "failed", "cancelled"]);
-const initialForm: FormState = {
-  niche: "skincare",
-  minimumPrice: "15",
-  maximumPrice: "60",
-  requestedProductCount: "5",
-  objective: "Identify products worth further evidence-based investigation.",
-  sourceId: "",
-};
+const initialForm: FormState = { niche: "skincare", minimumPrice: "15", maximumPrice: "60", requestedProductCount: "5", objective: "Identify products worth further evidence-based investigation.", sourceId: "" };
+const statusColors: Record<ResearchJob["status"], string> = { pending: "#f59e0b", running: "#0ea5e9", completed: "#10b981", partial: "#8b5cf6", failed: "#f43f5e", cancelled: "#94a3b8" };
+const scoreConfig = { score: { label: "Evidence score", color: "#0f766e" } } satisfies ChartConfig;
+const criteriaConfig = { priceFit: { label: "Price", color: "#0f766e" }, evidenceQuality: { label: "Evidence", color: "#2dd4bf" }, nicheRelevance: { label: "Niche", color: "#818cf8" }, informationCompleteness: { label: "Information", color: "#fbbf24" } } satisfies ChartConfig;
+const priceConfig = { price: { label: "Observed price", color: "#0f766e" } } satisfies ChartConfig;
 
-function formatDate(iso: string | null) {
-  if (!iso) return "Not started";
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(iso));
-}
+function formatDate(iso: string | null) { return iso ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(iso)) : "Not started"; }
+function formatCurrency(amount: number) { return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: amount === 0 ? 0 : 3, maximumFractionDigits: 3 }).format(amount); }
+function formatDuration(ms: number) { if (ms < 1_000) return "<1s"; const seconds = Math.round(ms / 1_000); return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`; }
+function shortName(value: string) { return value.length > 18 ? `${value.slice(0, 18)}…` : value; }
+function statusClass(status: ResearchJob["status"]) { return { pending: "border-amber-200 bg-amber-50 text-amber-800", running: "border-sky-200 bg-sky-50 text-sky-800", completed: "border-emerald-200 bg-emerald-50 text-emerald-800", partial: "border-violet-200 bg-violet-50 text-violet-800", failed: "border-rose-200 bg-rose-50 text-rose-800", cancelled: "border-slate-200 bg-slate-100 text-slate-700" }[status]; }
+function stageLabel(stage: ResearchJob["currentStage"]) { return { queued: "Waiting for worker", collecting: "Collecting source evidence", analyzing: "Reviewing collected evidence", scoring: "Scoring candidates", finalizing: "Saving report", completed: "Completed" }[stage]; }
+function eventLabel(event: PersistedEvent) { return ({ job_created: "Research request queued", job_claimed: "Worker claimed the request", fixture_collection_completed: "Fixture collection completed", agent_started: "Claude agent started", agent_completed: "Claude agent completed", agent_failed: "Claude agent stopped", tool_started: "Research tool started", tool_completed: "Research tool completed", tool_failed: "Research tool returned a safe failure", job_finished: "Research run finished", job_failed: "Worker stopped" }[event.type] ?? event.type.replaceAll("_", " ")); }
+function collectionCount(events: PersistedEvent[], report: ReportResponse | null) { if (report) return report.products.length; const counts = events.flatMap((event) => { const match = /(?:^|\s)(\d+) (?:product candidates|products) (?:persisted|collected)/i.exec(event.detail ?? ""); return match ? [Number(match[1])] : []; }); return counts.at(-1) ?? 0; }
+async function asJson<T>(response: Response): Promise<T> { const body = (await response.json()) as T & { error?: { message?: string } }; if (!response.ok) throw new Error(body.error?.message ?? "The request could not be completed."); return body; }
 
-function statusClasses(status: ResearchJob["status"]) {
-  return {
-    pending: "bg-amber-50 text-amber-700 ring-amber-200",
-    running: "bg-sky-50 text-sky-700 ring-sky-200",
-    completed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-    partial: "bg-violet-50 text-violet-700 ring-violet-200",
-    failed: "bg-rose-50 text-rose-700 ring-rose-200",
-    cancelled: "bg-slate-100 text-slate-600 ring-slate-200",
-  }[status];
-}
-
-async function asJson<T>(response: Response): Promise<T> {
-  const body = (await response.json()) as T & { error?: { message?: string } };
-  if (!response.ok) throw new Error(body.error?.message ?? "The request could not be completed.");
-  return body;
+function runtimeInfo(runtime: RuntimeState) {
+  if (runtime === "deterministic_fixture") return { label: "Fixture runtime", title: "Deterministic evidence workflow", description: "Uses local synthetic catalog records. No Claude API call or live-market claim is made.", Icon: FlaskConical, classes: "border-violet-200 bg-violet-50 text-violet-800" };
+  if (runtime === "claude_agent") return { label: "Claude agent runtime", title: "Live Claude + approved browser sources", description: "Claude may choose only registered MCP tools; collection remains restricted to approved sources.", Icon: Bot, classes: "border-teal-200 bg-teal-50 text-teal-800" };
+  return { label: "Live runtime blocked", title: "Anthropic credentials are unavailable", description: "Live jobs remain disabled until a server-only ANTHROPIC_API_KEY is configured.", Icon: TriangleAlert, classes: "border-amber-200 bg-amber-50 text-amber-900" };
 }
 
 export function ResearchDashboard() {
   const [form, setForm] = useState<FormState>(initialForm);
-  const [sources, setSources] = useState<SourceResponse>({
-    mode: "fixtures",
-    liveAgentAvailable: false,
-    sources: [],
-  });
+  const [sources, setSources] = useState<SourceResponse>({ mode: "fixtures", runtime: "deterministic_fixture", liveAgentAvailable: false, sources: [] });
   const [jobs, setJobs] = useState<ResearchJob[]>([]);
   const [selectedJob, setSelectedJob] = useState<ResearchJob | null>(null);
   const [report, setReport] = useState<ReportResponse | null>(null);
+  const [events, setEvents] = useState<PersistedEvent[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refreshSources = useCallback(async (niche: FormState["niche"]) => {
-    const data = await asJson<SourceResponse>(
-      await fetch(`/api/research-sources?niche=${encodeURIComponent(niche)}`),
-    );
-    setSources(data);
-    setForm((current) => ({
-      ...current,
-      sourceId: data.sources.some((source) => source.id === current.sourceId)
-        ? current.sourceId
-        : (data.sources[0]?.id ?? ""),
-    }));
-  }, []);
+  const refreshSources = useCallback(async (niche: FormState["niche"]) => { const data = await asJson<SourceResponse>(await fetch(`/api/research-sources?niche=${encodeURIComponent(niche)}`)); setSources(data); setForm((current) => ({ ...current, sourceId: data.sources.some((source) => source.id === current.sourceId) ? current.sourceId : (data.sources[0]?.id ?? "") })); }, []);
+  const refreshHistory = useCallback(async () => { const data = await asJson<{ jobs: ResearchJob[] }>(await fetch("/api/research-jobs", { cache: "no-store" })); setJobs(data.jobs); }, []);
+  const loadReport = useCallback(async (job: ResearchJob) => { if (!terminalStatuses.has(job.status) || ["failed", "cancelled"].includes(job.status)) { setReport(null); return; } const response = await fetch(`/api/research-jobs/${job.id}/report`, { cache: "no-store" }); if (response.status === 409) { setReport(null); return; } setReport(await asJson<ReportResponse>(response)); }, []);
+  const loadEvents = useCallback(async (id: string) => { const data = await asJson<{ events: PersistedEvent[] }>(await fetch(`/api/research-jobs/${id}/events`, { cache: "no-store" })); setEvents(data.events); }, []);
+  const selectJob = useCallback(async (job: ResearchJob) => { setSelectedJob(job); setLoading(true); setError(null); try { await Promise.all([loadReport(job), loadEvents(job.id)]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not load the selected research run."); } finally { setLoading(false); } }, [loadEvents, loadReport]);
+  const refreshSelected = useCallback(async () => { if (!selectedJob) return; const data = await asJson<{ job: ResearchJob }>(await fetch(`/api/research-jobs/${selectedJob.id}`, { cache: "no-store" })); setSelectedJob(data.job); setJobs((current) => current.map((job) => job.id === data.job.id ? data.job : job)); await Promise.all([loadReport(data.job), loadEvents(data.job.id)]); }, [loadEvents, loadReport, selectedJob]);
 
-  const refreshHistory = useCallback(async () => {
-    const data = await asJson<{ jobs: ResearchJob[] }>(
-      await fetch("/api/research-jobs", { cache: "no-store" }),
-    );
-    setJobs(data.jobs);
-  }, []);
+  useEffect(() => { const timer = window.setTimeout(() => void Promise.all([refreshSources(initialForm.niche), refreshHistory()]).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load research data.")), 0); return () => window.clearTimeout(timer); }, [refreshHistory, refreshSources]);
+  useEffect(() => { if (!selectedJob || terminalStatuses.has(selectedJob.status)) return; const timer = window.setInterval(() => void refreshSelected().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not refresh research progress.")), 2_500); return () => window.clearInterval(timer); }, [refreshSelected, selectedJob]);
 
-  const loadReport = useCallback(async (job: ResearchJob) => {
-    if (!terminalStatuses.has(job.status) || ["failed", "cancelled"].includes(job.status)) {
-      setReport(null);
-      return;
-    }
-    const response = await fetch(`/api/research-jobs/${job.id}/report`, { cache: "no-store" });
-    if (response.status === 409) {
-      setReport(null);
-      return;
-    }
-    setReport(await asJson<ReportResponse>(response));
-  }, []);
+  const update = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((current) => ({ ...current, [key]: value }));
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setError(null); setSubmitting(true); try { const { job } = await asJson<{ job: ResearchJob }>(await fetch("/api/research-jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ niche: form.niche, minimumPrice: Number(form.minimumPrice), maximumPrice: Number(form.maximumPrice), requestedProductCount: Number(form.requestedProductCount), sourceIds: [form.sourceId], objective: form.objective }) })); setSelectedJob(job); setReport(null); await Promise.all([refreshHistory(), loadEvents(job.id)]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not start research."); } finally { setSubmitting(false); } };
+  const cancel = async () => { if (!selectedJob) return; setError(null); try { const { job } = await asJson<{ job: ResearchJob }>(await fetch(`/api/research-jobs/${selectedJob.id}/cancel`, { method: "POST" })); setSelectedJob(job); await Promise.all([refreshHistory(), loadEvents(job.id)]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not request cancellation."); } };
 
-  const refreshSelectedJob = useCallback(async () => {
-    if (!selectedJob) return;
-    const data = await asJson<{ job: ResearchJob }>(
-      await fetch(`/api/research-jobs/${selectedJob.id}`, { cache: "no-store" }),
-    );
-    setSelectedJob(data.job);
-    setJobs((current) => current.map((job) => (job.id === data.job.id ? data.job : job)));
-    await loadReport(data.job);
-  }, [loadReport, selectedJob]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void Promise.all([refreshSources(initialForm.niche), refreshHistory()]).catch((cause: unknown) =>
-        setError(cause instanceof Error ? cause.message : "Could not load research data."),
-      );
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [refreshHistory, refreshSources]);
-
-  useEffect(() => {
-    if (!selectedJob || terminalStatuses.has(selectedJob.status)) return;
-    const timer = window.setInterval(() => void refreshSelectedJob().catch(() => undefined), 2_500);
-    return () => window.clearInterval(timer);
-  }, [refreshSelectedJob, selectedJob]);
-
-  const chartData = useMemo(
-    () =>
-      (report?.products ?? []).map(({ product, evaluation }) => ({
-        name: product.name.length > 20 ? `${product.name.slice(0, 20)}…` : product.name,
-        score: evaluation?.score.total ?? 0,
-      })),
-    [report],
-  );
-
-  const updateForm = <K extends keyof FormState>(key: K, value: FormState[K]) => {
-    setForm((current) => ({ ...current, [key]: value }));
-  };
-
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setError(null);
-    setSubmitting(true);
-    try {
-      const { job } = await asJson<{ job: ResearchJob }>(
-        await fetch("/api/research-jobs", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            niche: form.niche,
-            minimumPrice: Number(form.minimumPrice),
-            maximumPrice: Number(form.maximumPrice),
-            requestedProductCount: Number(form.requestedProductCount),
-            sourceIds: [form.sourceId],
-            objective: form.objective,
-          }),
-        }),
-      );
-      setSelectedJob(job);
-      setReport(null);
-      await refreshHistory();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not start research.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const cancel = async () => {
-    if (!selectedJob) return;
-    try {
-      const { job } = await asJson<{ job: ResearchJob }>(
-        await fetch(`/api/research-jobs/${selectedJob.id}/cancel`, { method: "POST" }),
-      );
-      setSelectedJob(job);
-      await refreshHistory();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not request cancellation.");
-    }
-  };
-
-  const selectJob = async (job: ResearchJob) => {
-    setSelectedJob(job);
-    try {
-      await loadReport(job);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not load the selected report.");
-    }
-  };
-
-  const running = selectedJob?.status === "running" || selectedJob?.status === "pending";
-
-  return (
-    <main className="min-h-screen bg-[#f7f8f7] text-slate-900">
-      <header className="border-b border-slate-200 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 lg:px-8">
-          <div className="flex items-center gap-3">
-            <span className="grid size-10 place-items-center rounded-xl bg-teal-700 text-white shadow-sm">
-              <Radar className="size-5" aria-hidden="true" />
-            </span>
-            <div>
-              <p className="text-sm font-bold tracking-tight">CommerceScout AI</p>
-              <p className="text-xs text-slate-500">Autonomous e-commerce product research</p>
-            </div>
-          </div>
-          <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ring-1", sources.mode === "fixtures" ? "bg-violet-50 text-violet-700 ring-violet-200" : "bg-teal-50 text-teal-700 ring-teal-200")}>
-            {sources.mode === "fixtures" ? <FlaskConical className="size-3.5" /> : <Bot className="size-3.5" />}
-            {sources.mode === "fixtures" ? "Fixture mode" : "Live mode"}
-          </span>
-        </div>
-      </header>
-
-      <div className="mx-auto grid max-w-7xl gap-6 px-5 py-6 lg:grid-cols-[360px_minmax(0,1fr)] lg:px-8 lg:py-8">
-        <aside className="space-y-5">
-          <Card className="p-5">
-            <div className="mb-5 flex items-start justify-between gap-4">
-              <div><p className="text-sm font-bold">New research run</p><p className="mt-1 text-xs leading-5 text-slate-500">A worker persists the request, then collects only from the approved source.</p></div>
-              <Sparkles className="size-5 shrink-0 text-teal-700" />
-            </div>
-            <form className="space-y-4" onSubmit={submit}>
-              <Field label="Niche" htmlFor="niche"><select id="niche" value={form.niche} onChange={(event) => { const niche = event.target.value as FormState["niche"]; updateForm("niche", niche); void refreshSources(niche); }} className="field"><option value="skincare">Skincare</option><option value="beauty">Beauty</option><option value="electronics">Electronics</option></select></Field>
-              <div className="grid grid-cols-2 gap-3"><Field label="Min price" htmlFor="minimumPrice"><input id="minimumPrice" className="field" inputMode="decimal" min="0" type="number" value={form.minimumPrice} onChange={(event) => updateForm("minimumPrice", event.target.value)} required /></Field><Field label="Max price" htmlFor="maximumPrice"><input id="maximumPrice" className="field" inputMode="decimal" min="1" type="number" value={form.maximumPrice} onChange={(event) => updateForm("maximumPrice", event.target.value)} required /></Field></div>
-              <Field label="Product candidates" htmlFor="requestedProductCount"><input id="requestedProductCount" className="field" min="1" max="50" type="number" value={form.requestedProductCount} onChange={(event) => updateForm("requestedProductCount", event.target.value)} required /></Field>
-              <Field label="Approved source" htmlFor="sourceId"><select id="sourceId" className="field" value={form.sourceId} onChange={(event) => updateForm("sourceId", event.target.value)} disabled={sources.sources.length === 0}>{sources.sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select><p className="mt-1.5 text-[11px] leading-4 text-slate-500">{sources.sources.find((source) => source.id === form.sourceId)?.sourceNotice}</p></Field>
-              <Field label="Research objective" htmlFor="objective"><textarea id="objective" className="field min-h-24 resize-y" value={form.objective} onChange={(event) => updateForm("objective", event.target.value)} required /></Field>
-              <Button className="w-full" type="submit" disabled={submitting || !form.sourceId}>{submitting ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-4" />}{submitting ? "Queueing research…" : "Start research"}</Button>
-            </form>
-          </Card>
-          <Card className="p-4"><div className="flex gap-3"><ShieldCheck className="mt-0.5 size-5 shrink-0 text-teal-700" /><p className="text-xs leading-5 text-slate-600">The runtime agent has no shell or arbitrary browser access. Sources, page limits, turns, cost, and cancellation are enforced on the server.</p></div></Card>
-        </aside>
-
-        <section className="min-w-0 space-y-6">
-          {error && <div className="flex gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800"><AlertCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
-          <StatusPanel job={selectedJob} running={Boolean(running)} onCancel={cancel} />
-          {report ? <Results report={report} chartData={chartData} /> : <EmptyResults job={selectedJob} />}
-          <History jobs={jobs} selectedId={selectedJob?.id} onSelect={selectJob} />
-        </section>
-      </div>
-    </main>
-  );
+  const runtime = runtimeInfo(sources.runtime); const RuntimeIcon = runtime.Icon; const activeSource = sources.sources.find((source) => source.id === form.sourceId);
+  return <main className="min-h-screen bg-[#f7f8f7] text-slate-950"><aside className="hidden w-64 flex-col border-r border-slate-200 bg-white lg:fixed lg:inset-y-0 lg:flex"><Brand /><nav className="px-3 py-5" aria-label="Primary navigation"><a className="flex items-center gap-3 rounded-lg bg-teal-50 px-3 py-2.5 text-sm font-semibold text-teal-900" href="#workspace"><LayoutDashboard className="size-4" />Research workspace</a><a className="mt-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50" href="#history"><History className="size-4" />Run history</a><a className="mt-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50" href="#method"><ShieldCheck className="size-4" />Safeguards</a></nav><div className="mt-auto p-4"><RuntimeNotice compact runtime={sources.runtime} /></div></aside><div className="min-h-screen lg:pl-64"><header className="sticky top-0 z-20 border-b border-slate-200/90 bg-white/90 backdrop-blur"><div className="mx-auto flex max-w-[1560px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8"><div className="lg:hidden"><Brand compact /></div><div className="hidden lg:block"><p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">Product intelligence</p><p className="mt-0.5 text-sm font-semibold text-slate-800">Evidence-first research operations</p></div><div className={cn("inline-flex max-w-full items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold", runtime.classes)}><RuntimeIcon className="size-3.5 shrink-0" /><span className="truncate">{runtime.label}</span></div></div></header><div id="workspace" className="mx-auto max-w-[1560px] px-4 py-6 sm:px-6 lg:px-8 lg:py-8"><section className="mb-7 flex flex-col justify-between gap-5 xl:flex-row xl:items-end"><div className="max-w-2xl"><p className="text-sm font-semibold text-teal-700">Research workspace</p><h1 className="mt-1 text-3xl font-bold tracking-[-0.035em] sm:text-4xl">Find evidence worth following up.</h1><p className="mt-3 max-w-xl text-sm leading-6 text-slate-600 sm:text-base">Configure a bounded research run, follow the persisted execution trail, and compare source-backed catalog records without inventing market signals.</p></div><div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-xs"><span className="grid size-9 place-items-center rounded-lg bg-teal-50 text-teal-700"><ShieldCheck className="size-4" /></span><p className="text-xs leading-5 text-slate-600"><span className="block font-semibold text-slate-900">Bounded by design</span>Sources, turns, budgets, and cancellation remain server enforced.</p></div></section>{error && <div role="alert" className="mb-6 flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900"><AlertCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}<div className="grid items-start gap-6 2xl:grid-cols-[minmax(330px,390px)_minmax(0,1fr)]"><aside className="space-y-5 2xl:sticky 2xl:top-21"><ResearchForm activeSource={activeSource} blocked={sources.runtime === "live_agent_blocked"} form={form} onChange={update} onNicheChange={(niche) => { update("niche", niche); void refreshSources(niche).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not refresh approved sources.")); }} onSubmit={submit} sources={sources.sources} submitting={submitting} /><RuntimeNotice runtime={sources.runtime} /></aside><section className="min-w-0 space-y-6"><ExecutionPanel events={events} job={selectedJob} loading={loading} onCancel={cancel} report={report} />{report ? <Results report={report} /> : <EmptyResults job={selectedJob} runtime={sources.runtime} />}<RunHistory jobs={jobs} onSelect={selectJob} selectedId={selectedJob?.id} /></section></div></div></div></main>;
 }
 
-function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
-  return <label className="block" htmlFor={htmlFor}><span className="mb-1.5 block text-xs font-semibold text-slate-700">{label}</span>{children}</label>;
-}
+function Brand({ compact = false }: { compact?: boolean }) { return <div className={cn("flex items-center gap-3", !compact && "border-b border-slate-100 px-5 py-5")}><span className="grid size-9 place-items-center rounded-xl bg-teal-700 text-white shadow-sm"><Radar className="size-4.5" /></span><div className="min-w-0"><p className="truncate text-sm font-bold tracking-tight">CommerceScout AI</p>{!compact && <p className="mt-0.5 text-xs text-slate-500">Evidence-led product research</p>}</div></div>; }
+function RuntimeNotice({ runtime, compact = false }: { runtime: RuntimeState; compact?: boolean }) { const info = runtimeInfo(runtime); const Icon = info.Icon; return <Card id={compact ? undefined : "method"} className={cn("border", info.classes, compact ? "p-3.5" : "p-4")}><div className="flex gap-3"><Icon className="mt-0.5 size-4 shrink-0" /><div><p className="text-xs font-bold">{info.title}</p>{!compact && <p className="mt-1 text-xs leading-5 opacity-90">{info.description}</p>}</div></div></Card>; }
+function FormField({ id, label, helper, children }: { id: string; label: string; helper?: string; children: ReactNode }) { return <div className="space-y-1.5"><Label htmlFor={id}>{label}</Label>{children}{helper && <p className="text-[11px] leading-4 text-slate-400">{helper}</p>}</div>; }
+function ResearchForm({ activeSource, blocked, form, onChange, onNicheChange, onSubmit, sources, submitting }: { activeSource?: SourceDescriptor; blocked: boolean; form: FormState; onChange: <K extends keyof FormState>(key: K, value: FormState[K]) => void; onNicheChange: (niche: FormState["niche"]) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; sources: SourceDescriptor[]; submitting: boolean }) { return <Card className="overflow-hidden"><div className="border-b border-slate-100 px-5 py-4"><div className="flex items-start justify-between gap-4"><div><p className="text-sm font-bold">Configure research</p><p className="mt-1 text-xs leading-5 text-slate-500">Each request is stored first, then claimed by the research worker.</p></div><span className="grid size-8 shrink-0 place-items-center rounded-lg bg-teal-50 text-teal-700"><Target className="size-4" /></span></div></div><form className="space-y-4 p-5" onSubmit={onSubmit}><FormField id="niche" label="Research niche" helper="Controls sources"><Select id="niche" value={form.niche} onChange={(event) => onNicheChange(event.target.value as FormState["niche"])}><option value="skincare">Skincare</option><option value="beauty">Beauty</option><option value="electronics">Electronics</option></Select></FormField><div className="grid grid-cols-2 gap-3"><FormField id="minimumPrice" label="Minimum price" helper="USD"><Input id="minimumPrice" inputMode="decimal" min="0" type="number" value={form.minimumPrice} onChange={(event) => onChange("minimumPrice", event.target.value)} required /></FormField><FormField id="maximumPrice" label="Maximum price" helper="USD"><Input id="maximumPrice" inputMode="decimal" min="1" type="number" value={form.maximumPrice} onChange={(event) => onChange("maximumPrice", event.target.value)} required /></FormField></div><FormField id="requestedProductCount" label="Candidates" helper="1–50 records"><Input id="requestedProductCount" min="1" max="50" type="number" value={form.requestedProductCount} onChange={(event) => onChange("requestedProductCount", event.target.value)} required /></FormField><FormField id="sourceId" label="Approved source" helper={activeSource?.sourceNotice}><Select id="sourceId" value={form.sourceId} onChange={(event) => onChange("sourceId", event.target.value)} disabled={sources.length === 0}>{sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</Select></FormField><FormField id="objective" label="Research objective" helper="Bounded user input"><Textarea id="objective" value={form.objective} onChange={(event) => onChange("objective", event.target.value)} required /></FormField><Button className="w-full" type="submit" disabled={blocked || submitting || !form.sourceId}>{submitting ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-4" />}{blocked ? "Live research unavailable" : submitting ? "Queueing research…" : "Start research"}</Button>{blocked && <p className="flex gap-1.5 text-xs leading-5 text-amber-800"><TriangleAlert className="mt-0.5 size-3.5 shrink-0" />Add a server-only ANTHROPIC_API_KEY before a live request can be created.</p>}</form></Card>; }
 
-function StatusPanel({ job, running, onCancel }: { job: ResearchJob | null; running: boolean; onCancel: () => void }) {
-  if (!job) return <Card className="grid min-h-52 place-items-center border-dashed p-8 text-center"><div><FileSearch className="mx-auto size-8 text-slate-300" /><p className="mt-3 font-semibold">Ready to inspect an opportunity</p><p className="mt-1 max-w-sm text-sm text-slate-500">Create a research job to track collection, analysis, scoring, and report delivery.</p></div></Card>;
-  return <Card className="overflow-hidden"><div className="flex flex-col gap-5 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-bold capitalize">{job.request.niche} opportunity research</p><span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold capitalize ring-1", statusClasses(job.status))}>{job.status}</span></div><p className="mt-1.5 text-sm text-slate-500">{job.request.minimumPrice}–{job.request.maximumPrice} USD · {job.request.requestedProductCount} candidates · Started {formatDate(job.startedAt ?? job.createdAt)}</p></div><div className="flex shrink-0 gap-2">{running && <Button variant="destructive" onClick={onCancel}><Square className="size-3.5" />Cancel</Button>}{terminalStatuses.has(job.status) && !["failed", "cancelled"].includes(job.status) && <a className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-300 px-4 text-sm font-semibold text-slate-800 hover:bg-slate-50" href={`/api/research-jobs/${job.id}/export`}><Download className="size-4" />CSV</a>}</div></div><div className="border-t border-slate-100 bg-slate-50 px-5 py-4"><div className="flex items-center justify-between text-xs"><span className="flex items-center gap-2 font-semibold capitalize text-slate-700">{running && <LoaderCircle className="size-3.5 animate-spin text-teal-700" />}{job.currentStage}</span><span className="tabular-nums text-slate-500">{job.progressPercent}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-teal-700 transition-all" style={{ width: `${job.progressPercent}%` }} /></div>{job.sanitizedErrorMessage && <p className="mt-3 text-xs text-rose-700">{job.sanitizedErrorMessage}</p>}</div></Card>;
-}
+function ExecutionPanel({ events, job, loading, onCancel, report }: { events: PersistedEvent[]; job: ResearchJob | null; loading: boolean; onCancel: () => void; report: ReportResponse | null }) { if (!job) return <Card className="border-dashed p-5 sm:p-6"><div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex gap-4"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500"><FileSearch className="size-5" /></span><div><p className="font-bold">No research run selected</p><p className="mt-1 max-w-lg text-sm leading-6 text-slate-500">Start with a concise niche and price range. The dashboard shows persisted records, evidence, and execution events.</p></div></div><span className="w-fit rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-600">Configure a run</span></div></Card>; const active = job.status === "pending" || job.status === "running"; const elapsed = job.elapsedTimeMs ? formatDuration(job.elapsedTimeMs) : active ? "In progress" : "<1s"; const count = collectionCount(events, report); return <Card className="overflow-hidden"><div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-6"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="font-bold capitalize">{job.request.niche} opportunity research</h2><StatusBadge status={job.status} /></div><p className="mt-1.5 text-sm text-slate-500">{job.request.minimumPrice}–{job.request.maximumPrice} USD · {job.request.requestedProductCount} requested · {formatDate(job.startedAt ?? job.createdAt)}</p></div><div className="flex shrink-0 gap-2">{active && <Button variant="destructive" onClick={onCancel}><Square className="size-3.5" />Cancel</Button>}{terminalStatuses.has(job.status) && !["failed", "cancelled"].includes(job.status) && <a className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 shadow-xs hover:bg-slate-50" href={`/api/research-jobs/${job.id}/export`}><Download className="size-4" />CSV</a>}</div></div><div className="grid divide-y divide-slate-100 sm:grid-cols-3 sm:divide-x sm:divide-y-0"><ExecutionMetric icon={<ListChecks />} label="Current stage" value={stageLabel(job.currentStage)} /><ExecutionMetric icon={<FileSearch />} label="Collected records" value={active ? `${count} observed` : `${count} persisted`} /><ExecutionMetric icon={<CircleDollarSign />} label="Estimated API cost" value={job.request.mode === "fixtures" ? formatCurrency(0) : active ? "Pending final response" : formatCurrency(job.estimatedCostUsd)} /></div><div className="bg-slate-50/70 px-5 py-4 sm:px-6"><div className="flex items-center justify-between gap-4 text-xs"><span className="flex items-center gap-2 font-semibold text-slate-700" aria-live="polite">{loading || active ? <LoaderCircle className="size-3.5 animate-spin text-teal-700" /> : <CheckCircle2 className="size-3.5 text-emerald-600" />}{stageLabel(job.currentStage)}</span><span className="tabular-nums text-slate-500">{job.progressPercent}% · {elapsed}</span></div><div aria-label={`${job.progressPercent}% complete`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={job.progressPercent} className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200" role="progressbar"><div className="h-full rounded-full bg-teal-700 transition-[width] duration-300" style={{ width: `${job.progressPercent}%` }} /></div>{job.sanitizedErrorMessage && <p className="mt-3 flex gap-2 text-xs leading-5 text-rose-700"><XCircle className="mt-0.5 size-3.5 shrink-0" />{job.sanitizedErrorMessage}</p>}</div><EventTimeline events={events} /></Card>; }
+function ExecutionMetric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) { return <div className="flex items-start gap-3 px-5 py-4"><span className="mt-0.5 text-slate-400">{icon}</span><div><p className="text-[11px] font-semibold uppercase tracking-[0.09em] text-slate-400">{label}</p><p className="mt-1 text-sm font-semibold text-slate-800">{value}</p></div></div>; }
+function EventTimeline({ events }: { events: PersistedEvent[] }) { const recent = events.slice(-6); return <div className="border-t border-slate-100 px-5 py-4 sm:px-6"><div className="flex items-center justify-between gap-3"><p className="text-sm font-bold">Execution timeline</p><span className="text-xs font-medium text-slate-400">{events.length} persisted events</span></div>{recent.length === 0 ? <p className="mt-3 text-xs leading-5 text-slate-500">Events appear when a worker claims and processes this request.</p> : <ol className="mt-4 space-y-3">{recent.map((event, index) => <li className="flex gap-3" key={event.id}><span className={cn("mt-1.5 size-2 shrink-0 rounded-full", index === recent.length - 1 ? "bg-teal-600" : "bg-slate-300")} /><div className="min-w-0"><div className="flex flex-wrap items-baseline gap-x-2"><p className="text-xs font-semibold text-slate-700">{eventLabel(event)}</p><span className="text-[11px] text-slate-400">{formatDate(event.createdAt)}</span></div>{event.detail && <p className="mt-0.5 text-xs leading-5 text-slate-500">{event.detail}</p>}</div></li>)}</ol>}</div>; }
+function EmptyResults({ job, runtime }: { job: ResearchJob | null; runtime: RuntimeState }) { const message = job?.status === "failed" ? "Research did not complete. Review the persisted error, then adjust the bounded request." : job?.status === "cancelled" ? "Research was cancelled before a report was saved. Its event history remains available." : job ? "The worker is creating persisted evidence, evaluations, and a report." : runtime === "deterministic_fixture" ? "Fixture mode is ready for a fully local, deterministic walkthrough." : runtime === "claude_agent" ? "Live mode preserves tool events and evidence as the agent works." : "Live research remains disabled until server credentials are configured."; return <Card className="grid min-h-58 place-items-center p-6 text-center sm:p-8"><div className="max-w-xl"><span className="mx-auto grid size-11 place-items-center rounded-xl bg-teal-50 text-teal-700"><Sparkles className="size-5" /></span><h2 className="mt-4 text-lg font-bold">Evidence-backed results will appear here</h2><p className="mt-2 text-sm leading-6 text-slate-500">{message}</p></div></Card>; }
 
-function EmptyResults({ job }: { job: ResearchJob | null }) {
-  const text = job?.status === "failed" ? "Research did not complete" : job?.status === "cancelled" ? "Research was cancelled" : "Evidence-backed results will appear here";
-  return <Card className="grid min-h-72 place-items-center p-8 text-center"><div><CircleDollarSign className="mx-auto size-8 text-slate-300" /><p className="mt-3 font-semibold">{text}</p><p className="mt-1 text-sm text-slate-500">{job?.status === "running" ? "The worker is collecting and evaluating source-backed product evidence." : "Scores and exports are available after persisted records are evaluated."}</p></div></Card>;
-}
-
-function Results({ report, chartData }: { report: ReportResponse; chartData: Array<{ name: string; score: number }> }) {
-  const topScore = Math.max(...report.products.map(({ evaluation }) => evaluation?.score.total ?? 0), 0);
-  return <><div className="grid gap-4 md:grid-cols-3"><Metric icon={<FileSearch />} label="Ranked products" value={report.products.length.toString()} detail="Persisted records" /><Metric icon={<Sparkles />} label="Top evidence score" value={`${topScore}/100`} detail="Deterministic criteria" /><Metric icon={<Clock3 />} label="Execution cost" value={`$${report.job.estimatedCostUsd.toFixed(3)}`} detail={`${report.job.elapsedTimeMs} ms recorded`} /></div><Card className="p-5"><div className="mb-4 flex items-center justify-between gap-3"><div><p className="font-bold">Evidence score comparison</p><p className="mt-1 text-xs text-slate-500">Scores reflect observed fields, category match, and selected price range—not sales potential.</p></div><span className="shrink-0 rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-700">{report.report.report.mode === "deterministic_fixture" ? "Synthetic fixture data" : "Claude-assisted"}</span></div><div className="h-60"><ResponsiveContainer width="100%" height="100%"><BarChart data={chartData} margin={{ left: -20 }}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" /><XAxis dataKey="name" tick={{ fontSize: 11, fill: "#64748b" }} interval={0} tickLine={false} axisLine={false} /><YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: "#64748b" }} tickLine={false} axisLine={false} /><Tooltip cursor={{ fill: "#f1f5f9" }} /><Bar dataKey="score" fill="#0f766e" radius={[5, 5, 0, 0]} /></BarChart></ResponsiveContainer></div></Card><Card className="overflow-hidden"><div className="border-b border-slate-100 px-5 py-4"><p className="font-bold">Product ranking</p><p className="mt-1 text-xs text-slate-500">Source links and evidence gaps are retained for review.</p></div><div className="divide-y divide-slate-100">{report.products.map(({ product, evaluation }, index) => <article className="grid gap-4 p-5 sm:grid-cols-[2.5rem_minmax(0,1fr)_auto] sm:items-center" key={product.id}><span className="grid size-9 place-items-center rounded-lg bg-slate-100 text-sm font-bold text-slate-600">{index + 1}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{product.name}</p>{product.price !== null && <span className="text-sm text-slate-500">${product.price.toFixed(2)}</span>}</div><p className="mt-1 text-sm leading-5 text-slate-500">{product.description ?? "No source description available."}</p><div className="mt-2 flex flex-wrap gap-2 text-xs"><a className="inline-flex items-center gap-1 font-semibold text-teal-700 hover:text-teal-900" href={product.sourceUrl} target="_blank" rel="noreferrer">Source <ArrowUpRight className="size-3" /></a>{product.missingFields.map((field) => <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700" key={field}>Missing {field}</span>)}</div></div><div className="text-left sm:text-right"><p className="text-2xl font-bold tabular-nums text-teal-800">{evaluation?.score.total ?? "—"}</p><p className="text-xs font-medium text-slate-500">evidence score</p></div></article>)}</div></Card>{report.report.report.limitations.length > 0 && <Card className="border-amber-200 bg-amber-50 p-4"><p className="text-sm font-bold text-amber-900">Research limitations</p><ul className="mt-2 space-y-1 text-sm leading-5 text-amber-800">{report.report.report.limitations.map((limitation) => <li key={limitation}>• {limitation}</li>)}</ul></Card>}</>;
-}
-
-function Metric({ icon, label, value, detail }: { icon: ReactNode; label: string; value: string; detail: string }) {
-  return <Card className="p-4"><div className="flex items-start justify-between"><span className="text-slate-400">{icon}</span><span className="text-xs text-slate-500">{detail}</span></div><p className="mt-5 text-2xl font-bold tabular-nums">{value}</p><p className="mt-1 text-xs font-medium text-slate-500">{label}</p></Card>;
-}
-
-function History({ jobs, selectedId, onSelect }: { jobs: ResearchJob[]; selectedId?: string; onSelect: (job: ResearchJob) => void }) {
-  return <Card className="overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><p className="font-bold">Research history</p><p className="mt-1 text-xs text-slate-500">Every run retains status, timestamps, and sanitized events.</p></div><span className="text-xs font-semibold text-slate-500">{jobs.length} total</span></div>{jobs.length === 0 ? <p className="p-5 text-sm text-slate-500">No research jobs have been created.</p> : <div className="divide-y divide-slate-100">{jobs.map((job) => <button className={cn("flex w-full items-center justify-between gap-4 p-4 text-left transition-colors hover:bg-slate-50", selectedId === job.id && "bg-teal-50/50")} key={job.id} onClick={() => void onSelect(job)}><div className="min-w-0"><p className="truncate text-sm font-semibold capitalize">{job.request.niche} · {job.request.minimumPrice}–{job.request.maximumPrice} USD</p><p className="mt-1 text-xs text-slate-500">{formatDate(job.createdAt)} · {job.request.sourceIds[0]}</p></div><span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold capitalize ring-1", statusClasses(job.status))}>{job.status}</span></button>)}</div>}</Card>;
-}
+function Results({ report }: { report: ReportResponse }) { const products = useMemo(() => [...report.products].sort((a, b) => (b.evaluation?.score.total ?? 0) - (a.evaluation?.score.total ?? 0)), [report.products]); const scoreData = products.map(({ product, evaluation }) => ({ name: shortName(product.name), score: evaluation?.score.total ?? 0 })); const criteria = products.map(({ product, evaluation }) => ({ name: shortName(product.name), priceFit: evaluation?.score.priceFit ?? 0, evidenceQuality: evaluation?.score.evidenceQuality ?? 0, nicheRelevance: evaluation?.score.nicheRelevance ?? 0, informationCompleteness: evaluation?.score.informationCompleteness ?? 0 })); const prices = products.flatMap(({ product }) => product.price === null ? [] : [{ name: shortName(product.name), price: product.price }]); const fields = products.reduce((sum, { product }) => sum + 5 - product.missingFields.length, 0); const top = Math.max(...scoreData.map((row) => row.score), 0); return <section aria-label="Research results" className="space-y-6"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Metric icon={<FileSearch />} label="Ranked records" value={String(products.length)} detail="Persisted source records" /><Metric icon={<Sparkles />} label="Top evidence score" value={`${top}/100`} detail="Not a sales prediction" /><Metric icon={<ListChecks />} label="Observed field coverage" value={products.length ? `${Math.round((fields / (products.length * 5)) * 100)}%` : "—"} detail={`${fields}/${products.length * 5} core fields`} /><Metric icon={<Clock3 />} label="Research run" value={formatDuration(report.job.elapsedTimeMs)} detail={report.job.request.mode === "fixtures" ? "No API spend" : `${formatCurrency(report.job.estimatedCostUsd)} estimated`} /></div><div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]"><ChartCard description="Deterministic criteria only; not a claim about demand or profitability." title="Evidence score distribution">{scoreData.length >= 2 ? <ScoreChart data={scoreData} /> : <ChartEmpty label="At least two evaluated products are needed for a comparison chart." />}</ChartCard><EvidenceSummary products={products} report={report} /></div><div className="grid gap-6 xl:grid-cols-2"><ChartCard description="Price fit, observed evidence, niche relevance, and information completeness." title="Criterion comparison">{criteria.length >= 2 ? <CriteriaChart data={criteria} /> : <ChartEmpty label="At least two evaluated products are needed for a criteria chart." />}</ChartCard><ChartCard description="Catalog prices observed during this run, shown only when records provide a price." title="Observed price distribution">{prices.length >= 2 ? <PriceChart data={prices} /> : <ChartEmpty label="At least two observed prices are needed for a price chart." />}</ChartCard></div><ProductRanking products={products} />{report.report.report.limitations.length > 0 && <Card className="border-amber-200 bg-amber-50 p-5"><div className="flex gap-3"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-700" /><div><p className="text-sm font-bold text-amber-950">Research limitations</p><ul className="mt-2 space-y-1.5 text-sm leading-5 text-amber-900">{report.report.report.limitations.map((item) => <li key={item}>{item}</li>)}</ul></div></div></Card>}</section>; }
+function Metric({ icon, label, value, detail }: { icon: ReactNode; label: string; value: string; detail: string }) { return <Card className="p-4"><div className="flex items-start justify-between gap-3"><span className="text-teal-700">{icon}</span><span className="max-w-[60%] text-right text-[11px] leading-4 text-slate-400">{detail}</span></div><p className="mt-5 text-2xl font-bold tracking-[-0.03em] tabular-nums">{value}</p><p className="mt-1 text-xs font-semibold text-slate-600">{label}</p></Card>; }
+function ChartCard({ title, description, children }: { title: string; description: string; children: ReactNode }) { return <Card className="overflow-hidden"><div className="border-b border-slate-100 px-5 py-4"><p className="font-bold">{title}</p><p className="mt-1 text-xs leading-5 text-slate-500">{description}</p></div><div className="p-4 sm:p-5">{children}</div></Card>; }
+function ChartEmpty({ label }: { label: string }) { return <div className="grid h-68 place-items-center rounded-lg border border-dashed border-slate-200 bg-slate-50 px-6 text-center text-xs leading-5 text-slate-500">{label}</div>; }
+function ScoreChart({ data }: { data: Array<{ name: string; score: number }> }) { return <ChartContainer className="h-68" config={scoreConfig}><ResponsiveContainer width="100%" height="100%"><BarChart data={data} margin={{ top: 12, left: -18, right: 8, bottom: 4 }}><CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} /><XAxis axisLine={false} dataKey="name" interval={0} tick={{ fill: "#64748b", fontSize: 11 }} tickLine={false} /><YAxis axisLine={false} domain={[0, 100]} tick={{ fill: "#64748b", fontSize: 11 }} tickLine={false} /><Tooltip cursor={{ fill: "#f8fafc" }} formatter={(value) => [`${value ?? ""}/100`, "Evidence score"]} /><Bar dataKey="score" fill="var(--color-score)" isAnimationActive={false} radius={[6, 6, 0, 0]} /></BarChart></ResponsiveContainer></ChartContainer>; }
+function CriteriaChart({ data }: { data: Array<Record<string, string | number>> }) { return <ChartContainer className="h-68" config={criteriaConfig}><ResponsiveContainer width="100%" height="100%"><BarChart data={data} margin={{ top: 12, left: -18, right: 8, bottom: 4 }}><CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} /><XAxis axisLine={false} dataKey="name" interval={0} tick={{ fill: "#64748b", fontSize: 11 }} tickLine={false} /><YAxis axisLine={false} domain={[0, 100]} tick={{ fill: "#64748b", fontSize: 11 }} tickLine={false} /><Tooltip cursor={{ fill: "#f8fafc" }} /><Bar dataKey="priceFit" fill="var(--color-priceFit)" isAnimationActive={false} stackId="criteria" /><Bar dataKey="evidenceQuality" fill="var(--color-evidenceQuality)" isAnimationActive={false} stackId="criteria" /><Bar dataKey="nicheRelevance" fill="var(--color-nicheRelevance)" isAnimationActive={false} stackId="criteria" /><Bar dataKey="informationCompleteness" fill="var(--color-informationCompleteness)" isAnimationActive={false} radius={[4, 4, 0, 0]} stackId="criteria" /></BarChart></ResponsiveContainer></ChartContainer>; }
+function PriceChart({ data }: { data: Array<{ name: string; price: number }> }) { return <ChartContainer className="h-68" config={priceConfig}><ResponsiveContainer width="100%" height="100%"><BarChart data={data} margin={{ top: 12, left: -18, right: 8, bottom: 4 }}><CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} /><XAxis axisLine={false} dataKey="name" interval={0} tick={{ fill: "#64748b", fontSize: 11 }} tickLine={false} /><YAxis axisLine={false} tick={{ fill: "#64748b", fontSize: 11 }} tickFormatter={(value) => `$${value}`} tickLine={false} /><Tooltip cursor={{ fill: "#f8fafc" }} formatter={(value) => [formatCurrency(Number(value ?? 0)), "Observed price"]} /><Bar dataKey="price" fill="var(--color-price)" isAnimationActive={false} radius={[6, 6, 0, 0]} /></BarChart></ResponsiveContainer></ChartContainer>; }
+function EvidenceSummary({ products, report }: { products: ReportResponse["products"]; report: ReportResponse }) { const missing = [...new Set(products.flatMap(({ product }) => product.missingFields))]; return <Card className="p-5"><div className="flex items-start justify-between gap-3"><div><p className="font-bold">Evidence review</p><p className="mt-1 text-xs leading-5 text-slate-500">{report.report.report.mode === "deterministic_fixture" ? "Synthetic fixture evidence" : "Claude-assisted evidence review"}</p></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-bold text-slate-600">{products.length} records</span></div><div className="mt-5 space-y-4"><div className="rounded-lg bg-teal-50 p-3"><p className="text-xs font-semibold text-teal-900">Interpretation boundary</p><p className="mt-1 text-xs leading-5 text-teal-800">Higher scores mean stronger observed catalog evidence for this request. They do not indicate demand, conversion, ROAS, or profitability.</p></div><div><p className="text-xs font-semibold text-slate-700">Common evidence gaps</p>{missing.length ? <div className="mt-2 flex flex-wrap gap-1.5">{missing.map((field) => <span className="rounded-md bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800" key={field}>Missing {field}</span>)}</div> : <p className="mt-1.5 text-xs text-slate-500">No core fields are missing from the retained records.</p>}</div></div></Card>; }
+function ProductRanking({ products }: { products: ReportResponse["products"] }) { return <Card className="overflow-hidden"><div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-bold">Product ranking</p><p className="mt-1 text-xs leading-5 text-slate-500">Prioritized by the documented evidence score. Verify any follow-up decision at the source.</p></div><span className="inline-flex w-fit items-center gap-1.5 rounded-full bg-teal-50 px-2.5 py-1 text-xs font-bold text-teal-800"><CheckCircle2 className="size-3.5" />Evidence grounded</span></div><div className="divide-y divide-slate-100">{products.map(({ product, evaluation }, index) => { const total = evaluation?.score.total ?? 0; const strengths = evaluation?.agentFinding?.differentiationConsiderations ?? evaluation?.observedStrengths ?? []; const risks = evaluation?.agentFinding?.risks ?? evaluation?.concerns ?? []; return <article className="p-5 sm:p-6" key={product.id}><div className="grid gap-4 lg:grid-cols-[2.75rem_minmax(0,1fr)_auto]"><span className="grid size-9 place-items-center rounded-lg bg-slate-100 text-sm font-bold text-slate-600">{index + 1}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-bold">{product.name}</h3>{product.price !== null && <span className="text-sm font-medium text-slate-500">{formatCurrency(product.price)}</span>}</div><p className="mt-1.5 max-w-3xl text-sm leading-6 text-slate-500">{product.description ?? "No source description was available for this record."}</p><div className="mt-3 flex flex-wrap items-center gap-2"><span className="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">{total >= 75 ? "Highest evidence coverage" : total >= 50 ? "Partial evidence coverage" : "Evidence gap requires review"}</span><a className="inline-flex items-center gap-1 text-xs font-semibold text-teal-700 hover:text-teal-900" href={product.sourceUrl} rel="noreferrer" target="_blank">Open source <ArrowUpRight className="size-3" /></a></div></div><div className="flex items-center gap-3 lg:block lg:text-right"><p className="text-3xl font-bold tracking-[-0.04em] text-teal-800 tabular-nums">{total}</p><p className="text-xs font-semibold text-slate-500">evidence score</p></div></div><div className="mt-5 grid gap-3 border-t border-slate-100 pt-4 md:grid-cols-3"><EvidenceColumn icon={<Sparkles />} label="Observed strengths" values={strengths} fallback="No additional strengths recorded." tone="teal" /><EvidenceColumn icon={<TriangleAlert />} label="Risks & gaps" values={risks} fallback="No additional risks recorded." tone="amber" /><EvidenceColumn icon={<ListChecks />} label="Score breakdown" values={[`Price fit ${evaluation?.score.priceFit ?? 0}/25`, `Evidence ${evaluation?.score.evidenceQuality ?? 0}/30`, `Niche ${evaluation?.score.nicheRelevance ?? 0}/20`, `Information ${evaluation?.score.informationCompleteness ?? 0}/25`]} tone="slate" /></div></article>; })}</div></Card>; }
+function EvidenceColumn({ icon, label, values, fallback, tone }: { icon: ReactNode; label: string; values: string[]; fallback?: string; tone: "teal" | "amber" | "slate" }) { const cls = { teal: "text-teal-700", amber: "text-amber-700", slate: "text-slate-500" }[tone]; return <div><p className={cn("flex items-center gap-1.5 text-xs font-bold", cls)}>{icon}{label}</p><ul className="mt-2 space-y-1 text-xs leading-5 text-slate-600">{values.length ? values.slice(0, 3).map((value) => <li key={value}>{value}</li>) : <li>{fallback}</li>}</ul></div>; }
+function RunHistory({ jobs, onSelect, selectedId }: { jobs: ResearchJob[]; onSelect: (job: ResearchJob) => void; selectedId?: string }) { const statuses = useMemo(() => Object.entries(jobs.reduce<Record<string, number>>((all, job) => ({ ...all, [job.status]: (all[job.status] ?? 0) + 1 }), {})).map(([status, count]) => ({ status, count, fill: statusColors[status as ResearchJob["status"]] })), [jobs]); return <Card id="history" className="overflow-hidden"><div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-bold">Research history</p><p className="mt-1 text-xs leading-5 text-slate-500">Persisted jobs survive reloads. Select a run to inspect its report and event trail.</p></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600">{jobs.length} total</span></div>{jobs.length >= 2 && <div className="grid border-b border-slate-100 lg:grid-cols-[190px_minmax(0,1fr)]"><div className="border-b border-slate-100 p-4 lg:border-r lg:border-b-0"><p className="text-xs font-semibold text-slate-700">Run status breakdown</p><ChartContainer className="mt-2 h-30" config={{}}><ResponsiveContainer width="100%" height="100%"><PieChart><Tooltip formatter={(value) => [value ?? "", "Runs"]} /><Pie data={statuses} dataKey="count" innerRadius={30} isAnimationActive={false} outerRadius={48} paddingAngle={3}>{statuses.map((entry) => <Cell fill={entry.fill} key={entry.status} />)}</Pie></PieChart></ResponsiveContainer></ChartContainer></div><div className="p-4"><p className="text-xs font-semibold text-slate-700">Recorded API estimate by run</p><div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{jobs.slice(0, 6).map((job) => <div className="rounded-lg bg-slate-50 px-3 py-2" key={job.id}><p className="truncate text-xs font-semibold capitalize text-slate-700">{job.request.niche} · {job.status}</p><p className="mt-1 text-sm font-bold tabular-nums">{job.request.mode === "fixtures" ? formatCurrency(0) : formatCurrency(job.estimatedCostUsd)}</p></div>)}</div></div></div>}{jobs.length === 0 ? <p className="p-5 text-sm text-slate-500">No research jobs have been created.</p> : <div className="divide-y divide-slate-100">{jobs.map((job) => <button className={cn("flex w-full items-center justify-between gap-4 px-5 py-4 text-left hover:bg-slate-50", selectedId === job.id && "bg-teal-50/60")} key={job.id} onClick={() => void onSelect(job)}><div className="min-w-0"><p className="truncate text-sm font-semibold capitalize text-slate-800">{job.request.niche} <span className="text-slate-400">·</span> {job.request.minimumPrice}–{job.request.maximumPrice} USD</p><p className="mt-1 truncate text-xs text-slate-500">{formatDate(job.createdAt)} · {job.request.sourceIds[0]}</p></div><div className="flex shrink-0 items-center gap-3"><StatusBadge status={job.status} /><ChevronRight className="size-4 text-slate-400" /></div></button>)}</div>}</Card>; }
+function StatusBadge({ status }: { status: ResearchJob["status"] }) { return <span className={cn("rounded-full border px-2.5 py-1 text-xs font-bold capitalize", statusClass(status))}>{status}</span>; }
