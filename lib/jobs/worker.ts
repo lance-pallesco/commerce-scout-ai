@@ -24,6 +24,9 @@ export type WorkerRunResult = Readonly<{
 }>;
 
 function eventDetail(event: AgentExecutionEvent): string | undefined {
+  if ("toolName" in event) {
+    return event.detail ? `${event.toolName}: ${event.detail}` : event.toolName;
+  }
   if ("detail" in event) return event.detail;
   return undefined;
 }

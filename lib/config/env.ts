@@ -39,7 +39,6 @@ const ServerConfigSchema = z.object({
   AGENT_MAX_TURNS: positiveInteger(1, 20, 8),
   AGENT_MAX_BUDGET_USD: positiveNumber(0.01, 25, 0.5),
   AGENT_TIMEOUT_MS: positiveInteger(1_000, 600_000, 120_000),
-  AGENT_MAX_RETRIES: positiveInteger(0, 5, 2),
   AGENT_DUPLICATE_ACTION_LIMIT: positiveInteger(1, 5, 2),
   AGENT_NO_PROGRESS_ACTION_LIMIT: positiveInteger(1, 10, 3),
   MAX_CONCURRENT_RESEARCH_JOBS: positiveInteger(1, 4, 1),
@@ -64,7 +63,6 @@ export type ServerConfig = Readonly<{
   agentMaxTurns: number;
   agentMaxBudgetUsd: number;
   agentTimeoutMs: number;
-  agentMaxRetries: number;
   agentDuplicateActionLimit: number;
   agentNoProgressActionLimit: number;
   maxConcurrentResearchJobs: number;
@@ -105,7 +103,6 @@ export function getServerConfig(
     agentMaxTurns: config.AGENT_MAX_TURNS,
     agentMaxBudgetUsd: config.AGENT_MAX_BUDGET_USD,
     agentTimeoutMs: config.AGENT_TIMEOUT_MS,
-    agentMaxRetries: config.AGENT_MAX_RETRIES,
     agentDuplicateActionLimit: config.AGENT_DUPLICATE_ACTION_LIMIT,
     agentNoProgressActionLimit: config.AGENT_NO_PROGRESS_ACTION_LIMIT,
     maxConcurrentResearchJobs: config.MAX_CONCURRENT_RESEARCH_JOBS,

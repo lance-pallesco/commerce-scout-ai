@@ -44,6 +44,38 @@ RESEARCH_MODE=live
 
 The key stays server-only. The standalone worker loads `.env*` through `@next/env`; the Agent SDK itself receives the key through its process environment.
 
+## Environment and safe live activation
+
+`.env.example` is the committed reference. `.env.local` is local-only and ignored by Git; this workspace includes a placeholder-only `.env.local` with an empty key. Do not put a key in any `NEXT_PUBLIC_*` variable.
+
+Open the local file in Windows PowerShell and change only these two lines when you are ready for a live run:
+
+```powershell
+notepad .env.local
+```
+
+```text
+ANTHROPIC_API_KEY=your_key_here
+RESEARCH_MODE=live
+```
+
+The web server automatically loads `.env.local`. The separate worker and live smoke command call `loadEnvConfig(process.cwd())` from `@next/env`, so they receive the same server-only variables. `RESEARCH_MODE=fixtures` is the safe default. In live mode without a key, the UI shows **Live runtime blocked** and the API refuses to create a job.
+
+Start the web app and persistent worker in two PowerShell windows:
+
+```powershell
+npm.cmd run dev
+npm.cmd run worker
+```
+
+After a key is present, this one-off command creates and processes only a new, small live job. Leave the web app running, but stop or do not start the persistent worker while this command runs: the command is its own worker. It refuses when another job is pending/running and enforces the lower of your configured values or: 5 turns, $0.10 estimated API budget, 90 seconds, one browser page, two electronics records, and the approved Web Scraper demonstration source.
+
+```powershell
+npm.cmd run smoke:live
+```
+
+It succeeds only after a real `claude_agent` report, persisted products, and a logged `collect_products` MCP tool completion are present. It never prints the key. The smoke command itself is the worker for this single request; do not run it until you accept the bounded Anthropic API and approved-source request.
+
 ## Run locally
 
 Start these in separate PowerShell terminals:
