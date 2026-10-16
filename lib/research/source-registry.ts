@@ -34,7 +34,7 @@ const sources = [
   },
   {
     id: "target-public-skincare",
-    name: "Target public skincare catalog",
+    name: "Target public product search",
     type: "browser",
     supportedCategories: ["skincare", "beauty"],
     nicheKeywords: ["skin", "skincare", "serum", "moisturizer", "cleanser", "sunscreen", "facial", "beauty", "makeup", "cosmetic", "cosmetics"],
@@ -42,11 +42,13 @@ const sources = [
     availability: "available",
     supportedModes: ["live"],
     allowedCapabilities: ["list", "collect", "details"],
+    searchable: true,
     collectionStrategy: "structured-search",
-    baseUrl: "https://www.target.com/c/skin-care-beauty/-/N-5xtzj",
+    baseUrl: "https://www.target.com/s?searchTerm=skincare",
+    searchUrlTemplate: "https://www.target.com/s?searchTerm={query}",
     allowedHosts: ["www.target.com", "target.com"],
     sourceNotice:
-      "Public Target skincare catalog pages are used only for product name, price, and provenance evidence. Availability and pricing can change.",
+      "Public Target search pages can discover multiple product categories and are used only for product name, price, and provenance evidence. Availability and pricing can change.",
   },
   {
     id: "ikea-public-search",
@@ -58,12 +60,13 @@ const sources = [
     availability: "available",
     supportedModes: ["live"],
     allowedCapabilities: ["list", "collect", "details"],
+    searchable: true,
     collectionStrategy: "structured-search",
     baseUrl: "https://www.ikea.com/us/en/search/?q=storage",
     searchUrlTemplate: "https://www.ikea.com/us/en/search/?q={query}",
     allowedHosts: ["www.ikea.com", "ikea.com"],
     sourceNotice:
-      "Public IKEA catalog pages are used only for product name, price, and provenance evidence. Availability and pricing can change.",
+      "Public IKEA search pages can discover multiple home-related product categories and are used only for product name, price, and provenance evidence. Availability and pricing can change.",
   },
 ] as const;
 
@@ -112,6 +115,7 @@ function normalizeNiche(niche?: string): string {
 }
 
 export function sourceSupportsNiche(source: SourceDescriptor, niche: string): boolean {
+  if (source.searchable) return true;
   if (source.supportedCategories.includes(niche)) return true;
   const terms = niche.split(/[^a-z0-9]+/).filter(Boolean);
   return terms.some((term) => source.nicheKeywords.includes(term));

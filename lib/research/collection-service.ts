@@ -7,7 +7,7 @@ import {
 } from "./contracts";
 import { collectWebScraperCatalogProducts } from "./browser-source";
 import { collectFixtureProducts } from "./fixture-source";
-import { filterProductsByPrice } from "./normalize";
+import { filterProductsByNiche, filterProductsByPrice } from "./normalize";
 import {
   assertSourceSupportsNiche,
   getResearchSource,
@@ -16,6 +16,7 @@ import {
 export type CollectProductsInput = Readonly<{
   sourceId: string;
   niche: string;
+  searchQuery?: string;
   limit: number;
   minimumPrice: number;
   maximumPrice: number;
@@ -38,14 +39,16 @@ export async function collectProducts(
       : await collectWebScraperCatalogProducts({
           source,
           niche: input.niche,
+          searchQuery: input.searchQuery,
           limit,
           headless: config.browserHeadless,
           timeoutMs: config.browserTimeoutMs,
           maxPages: config.browserMaxPagesPerRun,
           signal: input.signal,
         });
+  const nicheMatchedProducts = filterProductsByNiche(collected.products, input.niche);
   const filteredProducts = filterProductsByPrice(
-    collected.products,
+    nicheMatchedProducts,
     input.minimumPrice,
     input.maximumPrice,
   ).slice(0, limit);

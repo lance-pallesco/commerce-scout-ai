@@ -54,6 +54,7 @@ export function createDefaultBrowserLauncher(
 type BrowserCollectionOptions = Readonly<{
   source: SourceDescriptor;
   niche?: string;
+  searchQuery?: string;
   limit: number;
   headless: boolean;
   timeoutMs: number;
@@ -61,6 +62,18 @@ type BrowserCollectionOptions = Readonly<{
   signal?: AbortSignal;
   launchBrowser?: BrowserLauncher;
 }>;
+
+export function buildCollectionUrl(
+  source: SourceDescriptor,
+  niche?: string,
+  searchQuery?: string,
+): string | undefined {
+  if (source.collectionStrategy === "structured-search" && source.searchUrlTemplate) {
+    const query = searchQuery ?? niche ?? source.supportedCategories[0];
+    return source.searchUrlTemplate.replace("{query}", encodeURIComponent(query));
+  }
+  return source.baseUrl;
+}
 
 function assertNotAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -310,9 +323,7 @@ export async function collectWebScraperCatalogProducts(
       page.setDefaultTimeout(timeoutMs);
       assertNotAborted(options.signal);
       stage = "navigation";
-      const targetUrl = source.collectionStrategy === "structured-search" && source.searchUrlTemplate
-        ? source.searchUrlTemplate.replace("{query}", encodeURIComponent(niche ?? source.supportedCategories[0]))
-        : source.baseUrl;
+      const targetUrl = buildCollectionUrl(source, niche, options.searchQuery);
       if (!targetUrl) throw new BrowserCollectionError("SOURCE_EXTRACTION_FAILED", "The approved source has no collection URL.");
       await assertApprovedSourceUrl(targetUrl, source);
       await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });

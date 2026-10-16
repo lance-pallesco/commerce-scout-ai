@@ -200,7 +200,11 @@ describe("research job API", () => {
       mode: "live",
       runtime: "live_agent_blocked",
       liveAgentAvailable: false,
-      sources: [expect.objectContaining({ id: "webscraper-ecommerce-demo" })],
+      sources: expect.arrayContaining([
+        expect.objectContaining({ id: "webscraper-ecommerce-demo" }),
+        expect.objectContaining({ id: "target-public-skincare", searchable: true }),
+        expect.objectContaining({ id: "ikea-public-search", searchable: true }),
+      ]),
     });
 
     const jobResponse = await createJob(

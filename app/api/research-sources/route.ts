@@ -12,17 +12,19 @@ export async function GET(request: Request) {
     const config = getServerConfig();
     const niche = new URL(request.url).searchParams.get("niche") ?? undefined;
     const sources = listCompatibleResearchSources(niche ?? "", config.researchMode);
+    const availableSources = listResearchSources().filter(
+      (source) =>
+        source.availability === "available" &&
+        source.supportedModes.includes(config.researchMode),
+    );
     const supportedNiches = [
       ...new Set(
-        listResearchSources()
-          .filter(
-            (source) =>
-              source.availability === "available" &&
-              source.supportedModes.includes(config.researchMode),
-          )
-          .flatMap((source) => source.supportedCategories),
+        availableSources.flatMap((source) => source.supportedCategories),
       ),
     ];
+    if (availableSources.some((source) => source.searchable)) {
+      supportedNiches.push("searchable product discovery");
+    }
     const liveAgentAvailable =
       config.researchMode === "live" && Boolean(config.anthropicApiKey);
     return NextResponse.json({

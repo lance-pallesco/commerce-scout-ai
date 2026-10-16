@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   BrowserCollectionError,
+  buildCollectionUrl,
   collectWebScraperCatalogProducts,
   createDefaultBrowserLauncher,
   extractStructuredSearchProducts,
@@ -96,6 +97,13 @@ describe("webscraper product extraction", () => {
       category: "skincare",
       sourceId: "target-public-skincare",
     });
+  });
+
+  it("builds a bounded provider search URL from Claude's focused query", () => {
+    const searchSource = getResearchSource("target-public-skincare", "live");
+    expect(buildCollectionUrl(searchSource, "skincare", "fragrance free serum")).toBe(
+      "https://www.target.com/s?searchTerm=fragrance%20free%20serum",
+    );
   });
 
   it("reads a bounded retailer listing payload without executing it", async () => {

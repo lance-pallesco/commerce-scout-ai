@@ -7,7 +7,7 @@ Codex develops and maintains this repository. At runtime, `@anthropic-ai/claude-
 ## What works
 
 - Fixture-mode research: synthetic skincare records are collected, normalized, deduplicated, filtered, scored, persisted, rendered, and exported as CSV without an API key.
-- Browser collection: allowlisted Playwright adapters can collect the Web Scraper electronics demonstration catalog plus public Target skincare and IKEA home search pages for their registered niche keywords. Records retain source URLs and are never presented as fixture evidence.
+- Browser collection: allowlisted Playwright adapters can collect the Web Scraper electronics demonstration catalog plus bounded, query-driven Target and IKEA search pages. Claude may add a focused search phrase, but the backend always appends the submitted niche, enforces approved hosts, filters observed prices, and rejects unrelated records. Records retain source URLs and are never presented as fixture evidence.
 - Claude runtime tools: five in-process MCP tools expose approved sources and collected evidence only. Built-in shell, filesystem, and arbitrary browsing tools are disabled.
 - Autonomous source selection: the dashboard asks only for niche, price range, and candidate count. The backend resolves compatible registry sources and Claude chooses among the approved MCP tools; no source selector is exposed to ordinary users.
 - Live Claude path: a bounded smoke run has completed against Anthropic using the real Agent SDK, registered MCP tools, Playwright collection, validated structured output, SQLite persistence, and a `claude_agent` report (2 products, 18.3 seconds, $0.0305 estimated cost).
@@ -110,7 +110,7 @@ npm.cmd run build
 - Fixture records are clearly synthetic; they make no market, ad-performance, sales, or profitability claims.
 - The Web Scraper source is a public demonstration catalog, not an authorized ad-intelligence integration.
 - The SQLite MVP uses a local file lock and is designed for one local worker, not multi-host deployment.
-- Public retailer adapters are limited to their registered categories and may change markup, availability, or prices. They are product-page evidence, not market-demand, sales, or profitability evidence. A niche without a compatible registry source is rejected honestly.
+- Public retailer adapters may change markup, availability, or prices. Searchable adapters can try new niches without a per-niche catalog entry, but a run may still return no matching evidence; the agent reports that limitation instead of substituting another category. Records are product-page evidence, not market-demand, sales, or profitability evidence.
 
 ## Verification status (2026-10-16)
 

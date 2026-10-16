@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import type { AgentProductFinding, AgentResearchReport } from "@/lib/agent/contracts";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
-import { getResearchSource, sourceSupportsNiche } from "@/lib/research/source-registry";
+import { productMatchesNiche } from "@/lib/research/normalize";
 
 export const ScoreBreakdownSchema = z.object({
   priceFit: z.number().int().min(0).max(25),
@@ -80,26 +80,11 @@ export function scoreProduct(
     concerns.push("Core catalog evidence is incomplete.");
   }
 
-  let sourceMatchesNiche = false;
-  try {
-    sourceMatchesNiche = sourceSupportsNiche(
-      getResearchSource(product.sourceId),
-      request.niche,
-    );
-  } catch {
-    sourceMatchesNiche = false;
-  }
-  const nicheRelevance = sourceMatchesNiche || product.category?.toLowerCase() === request.niche.toLowerCase()
-    ? 20
-    : product.category
-      ? 8
-      : 0;
+  const nicheRelevance = productMatchesNiche(product, request.niche) ? 20 : 0;
   if (nicheRelevance === 20) {
     observedStrengths.push("The source categorizes this record in the selected niche.");
-  } else if (nicheRelevance === 8) {
-    concerns.push("The source category differs from the selected niche.");
   } else {
-    concerns.push("The source does not provide a category for niche matching.");
+    concerns.push("The collected record does not match the selected niche.");
   }
 
   const informationCompleteness = Math.round((evidenceCount / 5) * 25);

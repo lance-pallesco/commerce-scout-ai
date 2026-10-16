@@ -8,7 +8,7 @@ The live runtime agent uses `@anthropic-ai/claude-agent-sdk` and `query()`. It r
 - `get_research_candidates`
 - `get_research_criteria`
 
-All tools use Zod schemas and execute in-process. They scope reads and collection to the active job's approved source IDs, input niche, candidate limit, price range, cancellation signal, and duplicate-action limit. Product detail access accepts an already discovered identifier, not an arbitrary URL. Recoverable failures return structured `isError` results without raw exceptions.
+All tools use Zod schemas and execute in-process. They scope reads and collection to the active job's approved source IDs, input niche, optional bounded search phrase, candidate limit, price range, cancellation signal, and duplicate-action limit. Product detail access accepts an already discovered identifier, not an arbitrary URL. Recoverable failures return structured `isError` results without raw exceptions.
 
 The agent must first read criteria and sources, collect an approved batch, inspect evidence, and return a structured completion/partial report. The report is rejected if it cites a product not collected for the job. Its narrative is supplemental only: deterministic scoring never accepts model-generated score values.
 

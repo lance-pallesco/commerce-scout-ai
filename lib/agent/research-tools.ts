@@ -99,6 +99,7 @@ function describeSource(source: SourceDescriptor) {
     availability: source.availability,
     supportedModes: source.supportedModes,
     allowedCapabilities: source.allowedCapabilities,
+    searchable: source.searchable,
     sourceNotice: source.sourceNotice,
   };
 }
@@ -211,6 +212,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
     {
       sourceId: z.string().min(1).max(80).describe("An approved source identifier"),
       niche: z.string().trim().min(2).max(80).describe("The approved research niche"),
+      query: z.string().trim().min(2).max(120).optional().describe("Optional focused search phrase; the backend always includes the approved niche"),
       limit: z.number().int().min(1).max(50).describe("Maximum candidates to collect"),
       page: z.number().int().min(1).max(10).optional().describe("Optional catalog page"),
     },
@@ -232,6 +234,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           {
             sourceId: input.sourceId,
             niche: state.request.niche,
+            searchQuery: input.query ? `${state.request.niche} ${input.query}` : state.request.niche,
             limit: Math.min(input.limit, state.request.requestedProductCount),
             minimumPrice: state.request.minimumPrice,
             maximumPrice: state.request.maximumPrice,

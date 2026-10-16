@@ -50,6 +50,20 @@ describe("evidence-based scoring", () => {
     ]);
   });
 
+  it("does not award price or niche fit to an unrelated out-of-range product", () => {
+    const product = {
+      ...collectFixtureProducts({ niche: "skincare", limit: 5 }).products[0],
+      name: "Gaming laptop",
+      category: "electronics",
+      price: 1_299,
+    };
+    const evaluation = scoreProduct(product, criteria);
+
+    expect(evaluation.score.priceFit).toBe(0);
+    expect(evaluation.score.nicheRelevance).toBe(0);
+    expect(evaluation.score.total).toBeLessThan(75);
+  });
+
   it("attaches model findings without allowing them to change the score", () => {
     const products = collectFixtureProducts({ niche: "skincare", limit: 5 }).products;
     const evaluations = evaluateProducts(products, criteria, {

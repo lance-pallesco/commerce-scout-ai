@@ -73,6 +73,7 @@ export const SourceDescriptorSchema = z.object({
   baseUrl: z.string().url().optional(),
   allowedHosts: z.array(z.string().min(1).max(255)).default([]),
   collectionStrategy: BrowserCollectionStrategySchema.default("webscraper-catalog"),
+  searchable: z.boolean().default(false),
   searchUrlTemplate: z.string().min(1).max(2_000).optional(),
   nicheKeywords: z.array(z.string().min(1).max(80)).default([]),
   canonicalCategory: z.string().min(1).max(80).optional(),

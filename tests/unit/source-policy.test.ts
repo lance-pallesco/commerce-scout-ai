@@ -35,8 +35,11 @@ describe("browser source policy", () => {
     expect(isPublicInternetAddress("8.8.8.8")).toBe(true);
   });
 
-  it("matches bounded niche keywords without authorizing unrelated sources", () => {
+  it("matches bounded niche keywords and exposes approved dynamic search sources", () => {
     expect(listCompatibleResearchSources("facial serum", "live").map((item) => item.id)).toContain("target-public-skincare");
-    expect(listCompatibleResearchSources("garden tractors", "live")).toEqual([]);
+    expect(listCompatibleResearchSources("garden tractors", "live").map((item) => item.id)).toEqual([
+      "target-public-skincare",
+      "ikea-public-search",
+    ]);
   });
 });

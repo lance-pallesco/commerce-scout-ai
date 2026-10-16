@@ -163,3 +163,28 @@ export function filterProductsByPrice(
       product.price <= maximumPrice,
   );
 }
+
+function nicheTerms(niche: string): string[] {
+  return niche
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 3);
+}
+
+export function productMatchesNiche(product: ProductCandidate, niche: string): boolean {
+  const terms = nicheTerms(niche);
+  if (terms.length === 0) return false;
+  const searchableText = [product.name, product.category, product.description]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return terms.some((term) => searchableText.includes(term));
+}
+
+export function filterProductsByNiche(
+  products: readonly ProductCandidate[],
+  niche: string,
+): ProductCandidate[] {
+  return products.filter((product) => productMatchesNiche(product, niche));
+}
