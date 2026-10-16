@@ -11,9 +11,16 @@ export async function GET(request: Request) {
     const sources = listResearchSources(niche).filter((source) =>
       source.supportedModes.includes(config.researchMode),
     );
+    const liveAgentAvailable =
+      config.researchMode === "live" && Boolean(config.anthropicApiKey);
     return NextResponse.json({
       mode: config.researchMode,
-      liveAgentAvailable: config.researchMode === "fixtures" || Boolean(config.anthropicApiKey),
+      runtime: config.researchMode === "fixtures"
+        ? "deterministic_fixture"
+        : liveAgentAvailable
+          ? "claude_agent"
+          : "live_agent_blocked",
+      liveAgentAvailable,
       sources,
     });
   } catch (error) {

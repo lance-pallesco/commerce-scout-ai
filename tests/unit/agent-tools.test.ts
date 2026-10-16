@@ -1,5 +1,5 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { getServerConfig } from "@/lib/config/env";
 import {
@@ -67,6 +67,37 @@ describe("research MCP tools", () => {
     ).resolves.toMatchObject({ isError: true });
   });
 
+  it("returns recoverable empty collection results, then stops repeated no-progress collection", async () => {
+    const noProgressRequest = ResearchRequestSchema.parse({
+      ...request,
+      minimumPrice: 500,
+      maximumPrice: 600,
+    });
+    const onNoProgress = vi.fn();
+    const definitions = createResearchToolDefinitions({
+      request: noProgressRequest,
+      config: getServerConfig({
+        RESEARCH_MODE: "fixtures",
+        AGENT_DUPLICATE_ACTION_LIMIT: "5",
+        AGENT_NO_PROGRESS_ACTION_LIMIT: "1",
+      }),
+      onNoProgress,
+    });
+    const collect = handlerFor(definitions, "collect_products");
+    const input = {
+      sourceId: "fixture-skincare-catalog",
+      niche: "skincare",
+      limit: 5,
+    };
+
+    await expect(collect({ ...input, page: 1 })).resolves.not.toHaveProperty("isError");
+    await expect(collect({ ...input, page: 2 })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "TOOL_NO_PROGRESS" } },
+    });
+    expect(onNoProgress).toHaveBeenCalledOnce();
+  });
+
   it("uses a restricted SDK request and validates mocked structured output", async () => {
     const candidates = collectFixtureProducts({ niche: "skincare", limit: 5 }).products;
     let capturedOptions: Record<string, unknown> | undefined;
@@ -129,6 +160,22 @@ describe("research MCP tools", () => {
     });
 
     expect(result).toMatchObject({ status: "failed", errorCode: "AGENT_MAX_TURNS" });
+  });
+
+  it("classifies an already-aborted caller signal as cancellation without starting a query", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const queryExecutor = vi.fn();
+
+    const result = await runResearchAgent({
+      request,
+      config,
+      signal: controller.signal,
+      queryExecutor: queryExecutor as never,
+    });
+
+    expect(result).toMatchObject({ status: "cancelled", errorCode: "AGENT_CANCELLED" });
+    expect(queryExecutor).not.toHaveBeenCalled();
   });
 
   it("states that catalog content is untrusted, including malicious-looking text", () => {

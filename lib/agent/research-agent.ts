@@ -71,6 +71,7 @@ export class AgentExecutionError extends Error {
     | "AGENT_INVALID_OUTPUT"
     | "AGENT_MAX_TURNS"
     | "AGENT_MAX_BUDGET"
+    | "AGENT_NO_PROGRESS"
     | "AGENT_EXECUTION_FAILED";
 
   constructor(code: AgentExecutionError["code"], message: string) {
@@ -141,10 +142,7 @@ function toFailure(
           "AGENT_EXECUTION_FAILED",
           "The research agent could not complete its execution.",
         );
-  const status =
-    agentError.code === "AGENT_CANCELLED" || agentError.code === "AGENT_TIMEOUT"
-      ? "cancelled"
-      : "failed";
+  const status = agentError.code === "AGENT_CANCELLED" ? "cancelled" : "failed";
 
   return {
     status,
@@ -164,22 +162,40 @@ export async function runResearchAgent(
   const abortController = new AbortController();
   let finalResult: SDKResultMessage | undefined;
   let collectedCandidates: ProductCandidate[] = [];
-  let abortReason: "cancelled" | "timeout" | undefined;
+  let abortReason: "cancelled" | "timeout" | "no_progress" | undefined;
   const propagateCancellation = () => {
     abortReason = "cancelled";
     abortController.abort();
   };
   options.signal?.addEventListener("abort", propagateCancellation, { once: true });
+  if (options.signal?.aborted) propagateCancellation();
   const timeout = setTimeout(() => {
     abortReason = "timeout";
     abortController.abort();
   }, options.config.agentTimeoutMs);
+
+  const interruptionError = () => {
+    if (abortReason === "timeout") {
+      return new AgentExecutionError(
+        "AGENT_TIMEOUT",
+        "Research stopped after reaching its execution timeout.",
+      );
+    }
+    if (abortReason === "no_progress") {
+      return new AgentExecutionError(
+        "AGENT_NO_PROGRESS",
+        "Research stopped because repeated collection actions produced no new evidence.",
+      );
+    }
+    return new AgentExecutionError("AGENT_CANCELLED", "Research execution was cancelled.");
+  };
 
   const emit = async (event: AgentExecutionEvent) => {
     await options.onEvent?.(event);
   };
 
   try {
+    if (abortController.signal.aborted) throw interruptionError();
     assertLiveResearchAvailable(options.config);
     await emit({ type: "agent_started", at: new Date().toISOString() });
     const mcp = (options.mcpServerFactory ?? createResearchMcpServer)({
@@ -187,6 +203,10 @@ export async function runResearchAgent(
       config: options.config,
       signal: abortController.signal,
       onEvent: emit,
+      onNoProgress: () => {
+        if (!abortReason) abortReason = "no_progress";
+        abortController.abort();
+      },
     });
     const executor = options.queryExecutor ?? query;
     const messages = executor({
@@ -213,12 +233,7 @@ export async function runResearchAgent(
         finalResult = message;
       }
       if (abortController.signal.aborted) {
-        throw new AgentExecutionError(
-          abortReason === "timeout" ? "AGENT_TIMEOUT" : "AGENT_CANCELLED",
-          abortReason === "timeout"
-            ? "Research stopped after reaching its execution timeout."
-            : "Research execution was cancelled.",
-        );
+        throw interruptionError();
       }
     }
 
@@ -245,7 +260,12 @@ export async function runResearchAgent(
       turns: finalResult.num_turns,
     };
   } catch (error) {
-    const failure = toFailure(error, collectedCandidates, startedAt, finalResult);
+    const failure = toFailure(
+      abortController.signal.aborted ? interruptionError() : error,
+      collectedCandidates,
+      startedAt,
+      finalResult,
+    );
     await emit({
       type: "agent_failed",
       at: new Date().toISOString(),

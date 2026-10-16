@@ -41,6 +41,7 @@ const ServerConfigSchema = z.object({
   AGENT_TIMEOUT_MS: positiveInteger(1_000, 600_000, 120_000),
   AGENT_MAX_RETRIES: positiveInteger(0, 5, 2),
   AGENT_DUPLICATE_ACTION_LIMIT: positiveInteger(1, 5, 2),
+  AGENT_NO_PROGRESS_ACTION_LIMIT: positiveInteger(1, 10, 3),
   MAX_CONCURRENT_RESEARCH_JOBS: positiveInteger(1, 4, 1),
   BROWSER_HEADLESS: booleanSetting(true),
   BROWSER_TIMEOUT_MS: positiveInteger(1_000, 120_000, 15_000),
@@ -65,6 +66,7 @@ export type ServerConfig = Readonly<{
   agentTimeoutMs: number;
   agentMaxRetries: number;
   agentDuplicateActionLimit: number;
+  agentNoProgressActionLimit: number;
   maxConcurrentResearchJobs: number;
   browserHeadless: boolean;
   browserTimeoutMs: number;
@@ -105,6 +107,7 @@ export function getServerConfig(
     agentTimeoutMs: config.AGENT_TIMEOUT_MS,
     agentMaxRetries: config.AGENT_MAX_RETRIES,
     agentDuplicateActionLimit: config.AGENT_DUPLICATE_ACTION_LIMIT,
+    agentNoProgressActionLimit: config.AGENT_NO_PROGRESS_ACTION_LIMIT,
     maxConcurrentResearchJobs: config.MAX_CONCURRENT_RESEARCH_JOBS,
     browserHeadless: config.BROWSER_HEADLESS,
     browserTimeoutMs: config.BROWSER_TIMEOUT_MS,

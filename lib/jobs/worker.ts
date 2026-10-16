@@ -78,8 +78,8 @@ async function runClaudeResearch(
   signal: AbortSignal,
 ) {
   const job = await updateJobProgress(config, jobId, {
-    currentStage: "analyzing",
-    progressPercent: 20,
+    currentStage: "collecting",
+    progressPercent: 15,
   });
   const agent = await runResearchAgent({
     request: job.request,
@@ -87,6 +87,18 @@ async function runClaudeResearch(
     signal,
     onEvent: async (event) => {
       await appendJobEvent(config, jobId, event.type, eventDetail(event));
+      if (event.type === "agent_started") {
+        await updateJobProgress(config, jobId, { currentStage: "analyzing", progressPercent: 20 });
+      }
+      if (event.type === "tool_started" && event.toolName === "collect_products") {
+        await updateJobProgress(config, jobId, { currentStage: "collecting", progressPercent: 40 });
+      }
+      if (event.type === "tool_completed" && event.toolName === "collect_products") {
+        await updateJobProgress(config, jobId, { currentStage: "analyzing", progressPercent: 60 });
+      }
+      if (event.type === "tool_completed" && event.toolName === "get_research_candidates") {
+        await updateJobProgress(config, jobId, { currentStage: "analyzing", progressPercent: 70 });
+      }
     },
   });
   if (agent.status === "failed" || agent.status === "cancelled") {

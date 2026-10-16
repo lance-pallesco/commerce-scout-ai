@@ -107,7 +107,42 @@ describe("research job API", () => {
     expect(response.status).toBe(200);
     expect((await response.json()) as unknown).toMatchObject({
       mode: "fixtures",
+      runtime: "deterministic_fixture",
+      liveAgentAvailable: false,
       sources: [expect.objectContaining({ id: "fixture-skincare-catalog" })],
+    });
+  });
+
+  it("identifies an uncredentialed live runtime and rejects live jobs before queueing", async () => {
+    const fileName = `commerce-scout-api-${randomUUID()}.db`;
+    databaseFiles.push(path.resolve(process.cwd(), "data", fileName));
+    process.env.RESEARCH_MODE = "live";
+    process.env.DATABASE_URL = `file:./data/${fileName}`;
+    delete process.env.ANTHROPIC_API_KEY;
+
+    const sourceResponse = await getSources(
+      new Request("http://localhost/api/research-sources?niche=electronics"),
+    );
+    expect((await sourceResponse.json()) as unknown).toMatchObject({
+      mode: "live",
+      runtime: "live_agent_blocked",
+      liveAgentAvailable: false,
+      sources: [expect.objectContaining({ id: "webscraper-ecommerce-demo" })],
+    });
+
+    const jobResponse = await createJob(
+      new Request("http://localhost/api/research-jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          ...submission,
+          niche: "electronics",
+          sourceIds: ["webscraper-ecommerce-demo"],
+        }),
+      }),
+    );
+    expect(jobResponse.status).toBe(503);
+    expect((await jobResponse.json()) as unknown).toMatchObject({
+      error: { code: "INVALID_CONFIGURATION" },
     });
   });
 });

@@ -1,4 +1,4 @@
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import type { ProductCandidate, SourceDescriptor } from "./contracts";
 import {
@@ -131,13 +131,18 @@ export async function collectWebScraperCatalogProducts(
   }
 
   let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  const stopCollection = () => {
+    void context?.close().catch(() => undefined);
+  };
+  options.signal?.addEventListener("abort", stopCollection, { once: true });
   try {
     assertNotAborted(options.signal);
     await assertApprovedSourceUrl(source.baseUrl, source);
     browser = await (options.launchBrowser ?? chromium.launch)({
       headless: options.headless,
     });
-    const context = await browser.newContext();
+    context = await browser.newContext();
     try {
       await context.route("**/*", (route) => {
         if (isAllowedBrowserRequest(route.request().url(), source)) {
@@ -164,8 +169,16 @@ export async function collectWebScraperCatalogProducts(
       await context.close();
     }
   } catch (error) {
+    if (options.signal?.aborted) {
+      throw new BrowserCollectionError(
+        "COLLECTION_CANCELLED",
+        "Product collection was cancelled.",
+      );
+    }
     throw classifyBrowserError(error);
   } finally {
+    options.signal?.removeEventListener("abort", stopCollection);
+    await context?.close().catch(() => undefined);
     await browser?.close();
   }
 }

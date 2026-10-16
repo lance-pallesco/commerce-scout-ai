@@ -1,7 +1,11 @@
 import { chromium } from "playwright";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { BrowserCollectionError, extractWebScraperCatalogProducts } from "@/lib/research/browser-source";
+import {
+  BrowserCollectionError,
+  collectWebScraperCatalogProducts,
+  extractWebScraperCatalogProducts,
+} from "@/lib/research/browser-source";
 import { getResearchSource } from "@/lib/research/source-registry";
 
 const source = getResearchSource("webscraper-ecommerce-demo", "live");
@@ -60,5 +64,24 @@ describe("webscraper product extraction", () => {
     await expect(extractWebScraperCatalogProducts(page, source, 10)).rejects.toMatchObject({
       code: "SOURCE_EXTRACTION_FAILED",
     } satisfies Partial<BrowserCollectionError>);
+  });
+
+  it("does not launch a browser when the collection has already been cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const launchBrowser = vi.fn();
+
+    await expect(
+      collectWebScraperCatalogProducts({
+        source,
+        limit: 2,
+        headless: true,
+        timeoutMs: 1_000,
+        maxPages: 1,
+        signal: controller.signal,
+        launchBrowser,
+      }),
+    ).rejects.toMatchObject({ code: "COLLECTION_CANCELLED" });
+    expect(launchBrowser).not.toHaveBeenCalled();
   });
 });

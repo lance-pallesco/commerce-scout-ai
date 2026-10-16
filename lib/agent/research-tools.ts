@@ -36,6 +36,7 @@ export class AgentToolGuardrailError extends Error {
   readonly code:
     | "COLLECTION_CANCELLED"
     | "TOOL_ACTION_LIMIT"
+    | "TOOL_NO_PROGRESS"
     | "SOURCE_NOT_APPROVED"
     | "PRODUCT_NOT_DISCOVERED";
 
@@ -43,6 +44,7 @@ export class AgentToolGuardrailError extends Error {
     code:
       | "COLLECTION_CANCELLED"
       | "TOOL_ACTION_LIMIT"
+      | "TOOL_NO_PROGRESS"
       | "SOURCE_NOT_APPROVED"
       | "PRODUCT_NOT_DISCOVERED",
     message: string,
@@ -58,11 +60,13 @@ export type ResearchToolContext = Readonly<{
   config: ServerConfig;
   signal?: AbortSignal;
   onEvent?: (event: ToolExecutionEvent) => void | Promise<void>;
+  onNoProgress?: () => void;
 }>;
 
 type MutableResearchToolContext = ResearchToolContext & {
   candidates: ProductCandidate[];
   actionFingerprints: Map<string, number>;
+  consecutiveNoProgressActions: number;
 };
 
 function safeText(value: unknown): string {
@@ -132,6 +136,27 @@ function fingerprintAction(
   }
 }
 
+function recordCollectionProgress(
+  context: MutableResearchToolContext,
+  candidateCountBeforeCollection: number,
+): void {
+  if (context.candidates.length > candidateCountBeforeCollection) {
+    context.consecutiveNoProgressActions = 0;
+    return;
+  }
+
+  context.consecutiveNoProgressActions += 1;
+  if (context.consecutiveNoProgressActions <= context.config.agentNoProgressActionLimit) {
+    return;
+  }
+
+  context.onNoProgress?.();
+  throw new AgentToolGuardrailError(
+    "TOOL_NO_PROGRESS",
+    "Research stopped after repeated collection actions produced no new evidence.",
+  );
+}
+
 function approvedSource(context: MutableResearchToolContext, sourceId: string): void {
   if (!context.request.sourceIds.includes(sourceId)) {
     throw new AgentToolGuardrailError(
@@ -146,6 +171,7 @@ function buildToolContext(context: ResearchToolContext): MutableResearchToolCont
     ...context,
     candidates: [],
     actionFingerprints: new Map(),
+    consecutiveNoProgressActions: 0,
   };
 }
 
@@ -200,6 +226,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         }
         fingerprintAction(state, toolName, input);
         await recordEvent(state, "tool_started", toolName);
+        const candidateCountBeforeCollection = state.candidates.length;
         const result = await collectProducts(
           {
             sourceId: input.sourceId,
@@ -216,6 +243,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           ...state.candidates,
           ...result.products,
         ]).products;
+        recordCollectionProgress(state, candidateCountBeforeCollection);
         const data = {
           products: result.products,
           metadata: result.metadata,

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Database, SqlValue } from "sql.js";
 
-import type { ServerConfig } from "@/lib/config/env";
+import { assertLiveResearchAvailable, type ServerConfig } from "@/lib/config/env";
 import type { AgentResearchReport } from "@/lib/agent/contracts";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
 import type { ProductEvaluation } from "@/lib/scoring/score-product";
@@ -88,6 +88,9 @@ export async function createResearchJob(
 ): Promise<ResearchJob> {
   if (request.mode !== config.researchMode) {
     throw new Error("The requested research mode does not match the configured server mode.");
+  }
+  if (request.mode === "live") {
+    assertLiveResearchAvailable(config);
   }
 
   const job: ResearchJob = {
