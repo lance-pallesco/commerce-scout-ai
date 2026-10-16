@@ -38,6 +38,10 @@ actually requires it.
   live Claude executions. Clearly distinguish fixture data from live evidence.
 - Keep `ANTHROPIC_API_KEY` server-only. Never log it, return it from an API, or
   commit it. Do not modify an existing `.env.local`.
+- Preserve the explicit runtime-state contract: fixture runs, live-ready Claude
+  runs, and live-blocked (missing-key) runs must never be presented as one
+  another. Keep no-progress, duplicate-action, timeout, budget, and turn
+  limits enforced server-side.
 
 ## Engineering standards
 
@@ -47,6 +51,8 @@ actually requires it.
   Next.js conventions. Next 16 uses async route params/search params.
 - Add tests with every behavior change. Run `npm.cmd run lint`, `npm.cmd run
   typecheck`, and targeted Vitest/Playwright tests before calling work complete.
+- For material UI work, inspect both empty and populated fixture states at
+  desktop and narrow-mobile widths; assertion-only E2E success is insufficient.
 - Use `npm.cmd` and `npx.cmd` in Windows PowerShell because the `.ps1` shims may
   be blocked by execution policy.
 

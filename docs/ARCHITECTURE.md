@@ -20,3 +20,5 @@ Presentation components use API responses only. Route Handlers validate requests
 `sql.js` supplies SQLite without a native Windows compiler requirement. Each operation acquires an adjacent lock file, migrates the schema if required, writes an atomic temporary database file, then replaces the database. This is suitable for the single-worker local MVP only.
 
 The live worker runs the real Agent SDK `query()` entry point with no built-in tools, strict MCP configuration, a bounded model budget/turn count, and an abort controller. Fixture mode deliberately uses a deterministic pipeline when no API key exists; it is never represented as Claude execution.
+
+`/api/research-sources` exposes the actual runtime state as `deterministic_fixture`, `claude_agent`, or `live_agent_blocked`. A live job is rejected before queueing when `ANTHROPIC_API_KEY` is absent. The dashboard renders its stage, collection count, tool-event timeline, final estimated SDK cost, and report from persisted records only.

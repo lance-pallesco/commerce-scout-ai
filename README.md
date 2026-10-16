@@ -78,4 +78,11 @@ npm.cmd run build
 - The SQLite MVP uses a local file lock and is designed for one local worker, not multi-host deployment.
 - Live Claude execution has not been demonstrated in this environment because no Anthropic credential was supplied.
 
+## Verification status (2026-10-16)
+
+- Fixture research is verified end to end: a request is queued, claimed by the worker, collected from local fixture data, deterministically scored, persisted, rendered, and exported.
+- Playwright extraction is verified against deterministic local catalog markup and the production browser path is restricted to the approved Web Scraper host. The optional external smoke test was not run here, so no real external product extraction is claimed.
+- The live SDK request, MCP registration, strict tool configuration, structured-output validation, cancellation, budget/turn error handling, duplicate-action limit, and no-progress guard have unit coverage. A genuine Anthropic API-backed Claude tool call is blocked by the missing `ANTHROPIC_API_KEY` and is not represented as verified.
+- `npm audit` currently reports 12 advisories (2 critical, 9 high, 1 moderate), all through development/build tooling: Vitest/Tinypool, `eslint-config-next` globbing, and the shadcn CLI dependency tree. Available audit remediations require major-version changes; none were applied blindly. See the roadmap before deploying this project.
+
 Read the [demo guide](docs/DEMO_GUIDE.md) for an interview walkthrough and [roadmap](docs/ROADMAP.md) for deliberately deferred capabilities.

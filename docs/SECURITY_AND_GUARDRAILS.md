@@ -8,5 +8,7 @@
 - Turn, budget, timeout, tool timeout, duplicate action, collection size, page count, source, and concurrency limits are enforced in code. Cancellation uses an abort signal and a persisted cancellation flag.
 - `ANTHROPIC_API_KEY` is parsed only from server process configuration; no `NEXT_PUBLIC_` variant exists. API responses and error handling never include it.
 - Errors become accurate failed/partial/cancelled records. No failure path produces a fabricated success or invented evidence.
+- Repeated zero-evidence collection is stopped by a dedicated no-progress action limit. A cancellation signal closes an active Playwright context before the browser is closed, rather than waiting for a navigation timeout.
+- In live mode without a server-side key, the UI reports `live_agent_blocked` and the create-job route returns a configuration error before persisting an unusable job.
 
 Remaining limitations: local SQLite locking is not a distributed lock; external catalog terms can change; and this MVP has no authentication/rate limiting, so it must not be deployed as a public expensive-agent endpoint without an auth layer.
