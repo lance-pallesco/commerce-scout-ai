@@ -1,36 +1,81 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CommerceScout AI
 
-## Getting Started
+CommerceScout AI is an evidence-grounded e-commerce product-research MVP. It combines a Next.js dashboard, a separate local research worker, allowlisted Playwright catalog collection, deterministic scoring, local SQLite persistence, and a narrowly scoped Claude Agent SDK integration.
 
-First, run the development server:
+Codex develops and maintains this repository. At runtime, `@anthropic-ai/claude-agent-sdk` powers the optional Claude research agent; it is not replaced by an OpenAI agent framework.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## What works
+
+- Fixture-mode research: synthetic skincare records are collected, normalized, deduplicated, filtered, scored, persisted, rendered, and exported as CSV without an API key.
+- Browser collection: an allowlisted Playwright adapter can collect from the public Web Scraper demonstration catalog in live mode. It labels that catalog as electronics, never skincare.
+- Claude runtime tools: five in-process MCP tools expose approved sources and collected evidence only. Built-in shell, filesystem, and arbitrary browsing tools are disabled.
+- Local worker: atomic job claiming, worker leases, cancellation requests, terminal states, events, costs, reports, and product evidence persist to `data/commerce-scout.db`.
+- Dashboard: create a job, monitor genuine persisted status, inspect rankings and score charts, review limitations, view history, and download a CSV.
+
+## Architecture
+
+```text
+Dashboard → Route Handlers → SQLite job record → research worker
+                                               ├─ fixture or Playwright collection
+                                               ├─ Claude SDK + in-process MCP tools (live only)
+                                               └─ deterministic scoring → report/evidence → dashboard
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+See [architecture details](docs/ARCHITECTURE.md), [agent design](docs/AGENT_DESIGN.md), and [security guardrails](docs/SECURITY_AND_GUARDRAILS.md).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Setup (Windows PowerShell)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Prerequisites: Node.js 20.18+ (this workspace was validated on Node 26), npm, and Playwright Chromium. PowerShell execution policy can block `npm.ps1`; use `npm.cmd` and `npx.cmd` below.
 
-## Learn More
+```powershell
+npm.cmd install
+npx.cmd playwright install chromium
+Copy-Item .env.example .env.local
+```
 
-To learn more about Next.js, take a look at the following resources:
+The default `.env.example` runs deterministic fixtures. Do not commit `.env.local` or anything under `data/`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+For live Claude runs, create an Anthropic API key in the Anthropic Console and set:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```text
+ANTHROPIC_API_KEY=...
+RESEARCH_MODE=live
+```
 
-## Deploy on Vercel
+The key stays server-only. The standalone worker loads `.env*` through `@next/env`; the Agent SDK itself receives the key through its process environment.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Run locally
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Start these in separate PowerShell terminals:
+
+```powershell
+# Terminal 1
+npm.cmd run dev
+
+# Terminal 2
+npm.cmd run worker
+```
+
+Open `http://localhost:3000`. Submit a fixture job, then leave the worker running to claim and process it.
+
+## Testing and verification
+
+```powershell
+npm.cmd run lint
+npm.cmd run typecheck
+npm.cmd run test:unit
+npm.cmd run test:browser
+npm.cmd run test:e2e
+npm.cmd run build
+```
+
+`test:browser` uses local HTML with Chromium. The external browser smoke test is intentionally skipped unless `RUN_LIVE_BROWSER_TESTS=true`; it never requires a Claude key. A real Claude tool-call run is available only in live mode with valid Anthropic credentials and is not claimed by the fixture suite.
+
+## Important limitations
+
+- Fixture records are clearly synthetic; they make no market, ad-performance, sales, or profitability claims.
+- The Web Scraper source is a public demonstration catalog, not an authorized ad-intelligence integration.
+- The SQLite MVP uses a local file lock and is designed for one local worker, not multi-host deployment.
+- Live Claude execution has not been demonstrated in this environment because no Anthropic credential was supplied.
+
+Read the [demo guide](docs/DEMO_GUIDE.md) for an interview walkthrough and [roadmap](docs/ROADMAP.md) for deliberately deferred capabilities.
