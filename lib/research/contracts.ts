@@ -2,9 +2,11 @@ import { z } from "zod";
 
 export const CurrencySchema = z.enum(["USD"]);
 export const ResearchModeSchema = z.enum(["fixtures", "live"]);
+export const SourceSelectionSchema = z.enum(["automatic", "manual"]);
 export const SourceTypeSchema = z.enum(["fixture", "browser"]);
 
 export type ResearchMode = z.infer<typeof ResearchModeSchema>;
+export type SourceSelection = z.infer<typeof SourceSelectionSchema>;
 
 export const EvidenceSchema = z.object({
   field: z.string().min(1).max(80),
@@ -40,6 +42,7 @@ export const ResearchRequestSchema = z
     currency: CurrencySchema.default("USD"),
     requestedProductCount: z.number().int().min(1).max(50),
     sourceIds: z.array(z.string().min(1).max(80)).min(1).max(4),
+    sourceSelection: SourceSelectionSchema.optional(),
     mode: ResearchModeSchema,
     objective: z.string().trim().min(10).max(1_000),
   })

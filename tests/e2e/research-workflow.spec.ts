@@ -21,7 +21,11 @@ test.afterAll(async () => {
 test("submits a fixture job and displays persisted rankings", async ({ page }, testInfo) => {
   await page.goto("/");
   await expect(page.getByText("CommerceScout AI").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Automatic Recommended" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("Will use CommerceScout synthetic skincare catalog")).toBeVisible();
+  await page.getByRole("button", { name: "Manual Advanced" }).click();
   await expect(page.getByLabel("Approved source")).toHaveValue("fixture-skincare-catalog");
+  await page.getByRole("button", { name: "Automatic Recommended" }).click();
 
   await page.getByRole("button", { name: "Start research" }).click();
   await expect(page.getByText("skincare opportunity research")).toBeVisible();

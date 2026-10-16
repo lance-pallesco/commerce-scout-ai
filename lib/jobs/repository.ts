@@ -6,6 +6,10 @@ import type { AgentResearchReport } from "@/lib/agent/contracts";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
 import type { ProductEvaluation } from "@/lib/scoring/score-product";
 import { queryRows, withDatabase } from "@/lib/persistence/database";
+import {
+  assertSourceSupportsNiche,
+  getResearchSource,
+} from "@/lib/research/source-registry";
 
 import {
   PersistedEventSchema,
@@ -92,6 +96,10 @@ export async function createResearchJob(
   if (request.mode === "live") {
     assertLiveResearchAvailable(config);
   }
+  for (const sourceId of request.sourceIds) {
+    const source = getResearchSource(sourceId, request.mode);
+    assertSourceSupportsNiche(source, request.niche);
+  }
 
   const job: ResearchJob = {
     id: randomUUID(),
@@ -143,6 +151,15 @@ export async function createResearchJob(
     );
   });
   await appendJobEvent(config, job.id, "job_created", "Research job queued.");
+  const sourceNames = request.sourceIds.map((sourceId) => getResearchSource(sourceId, request.mode).name);
+  await appendJobEvent(
+    config,
+    job.id,
+    "source_selection",
+    request.sourceSelection === "automatic"
+      ? `Automatic source selection enabled for ${sourceNames.length} compatible source${sourceNames.length === 1 ? "" : "s"}: ${sourceNames.join(", ")}.`
+      : `Manual approved source selected: ${sourceNames[0]}.`,
+  );
   return job;
 }
 

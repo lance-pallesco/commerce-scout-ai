@@ -9,6 +9,7 @@ Codex develops and maintains this repository. At runtime, `@anthropic-ai/claude-
 - Fixture-mode research: synthetic skincare records are collected, normalized, deduplicated, filtered, scored, persisted, rendered, and exported as CSV without an API key.
 - Browser collection: an allowlisted Playwright adapter can collect from the public Web Scraper demonstration catalog in live mode. It labels that catalog as electronics, never skincare.
 - Claude runtime tools: five in-process MCP tools expose approved sources and collected evidence only. Built-in shell, filesystem, and arbitrary browsing tools are disabled.
+- Intelligent source selection: automatic mode resolves all registry-approved sources compatible with the niche and runtime so Claude can choose safely; manual mode remains available for one explicit approved source.
 - Live Claude path: a bounded smoke run has completed against Anthropic using the real Agent SDK, registered MCP tools, Playwright collection, validated structured output, SQLite persistence, and a `claude_agent` report (2 products, 18.3 seconds, $0.0305 estimated cost).
 - Local worker: atomic job claiming, worker leases, cancellation requests, terminal states, events, costs, reports, and product evidence persist to `data/commerce-scout.db`.
 - Dashboard: create a job, monitor genuine persisted status, inspect rankings and score charts, review limitations, view history, and download a CSV.

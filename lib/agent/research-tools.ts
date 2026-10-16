@@ -226,7 +226,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           );
         }
         fingerprintAction(state, toolName, input);
-        await recordEvent(state, "tool_started", toolName);
+        await recordEvent(state, "tool_started", toolName, `sourceId=${input.sourceId}`);
         const candidateCountBeforeCollection = state.candidates.length;
         const result = await collectProducts(
           {
@@ -250,7 +250,12 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           metadata: result.metadata,
           collectionStatus: "completed" as const,
         };
-        await recordEvent(state, "tool_completed", toolName, `${result.products.length} products collected`);
+        await recordEvent(
+          state,
+          "tool_completed",
+          toolName,
+          `sourceId=${input.sourceId}; ${result.products.length} products collected`,
+        );
         return toolSuccess(data);
       } catch (error) {
         await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));

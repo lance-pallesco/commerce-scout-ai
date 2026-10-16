@@ -10,5 +10,6 @@
 - Errors become accurate failed/partial/cancelled records. No failure path produces a fabricated success or invented evidence.
 - Repeated zero-evidence collection is stopped by a dedicated no-progress action limit. A cancellation signal closes an active Playwright context before the browser is closed, rather than waiting for a navigation timeout.
 - In live mode without a server-side key, the UI reports `live_agent_blocked` and the create-job route returns a configuration error before persisting an unusable job.
+- Automatic source selection is an allowlisted registry operation, not an unrestricted discovery request. The API resolves compatible sources for the niche and mode, manual selection accepts one compatible source, and the worker/MCP tools re-check those constraints before collection.
 
 Remaining limitations: local SQLite locking is not a distributed lock; external catalog terms can change; and this MVP has no authentication/rate limiting, so it must not be deployed as a public expensive-agent endpoint without an auth layer.

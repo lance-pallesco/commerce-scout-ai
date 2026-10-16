@@ -99,6 +99,79 @@ describe("research job API", () => {
     expect(unknown.status).toBe(404);
   });
 
+  it("resolves automatic selection to compatible registry sources and persists the selection", async () => {
+    configureFixtureEnvironment();
+    const response = await createJob(
+      new Request("http://localhost/api/research-jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          ...submission,
+          sourceIds: [],
+          sourceSelection: "automatic",
+        }),
+      }),
+    );
+    expect(response.status).toBe(201);
+    const { job } = (await response.json()) as {
+      job: { request: { sourceIds: string[]; sourceSelection?: string } };
+    };
+    expect(job.request).toMatchObject({
+      sourceIds: ["fixture-skincare-catalog"],
+      sourceSelection: "automatic",
+    });
+  });
+
+  it("rejects unsupported automatic niches and incompatible manual sources", async () => {
+    configureFixtureEnvironment();
+    const unsupported = await createJob(
+      new Request("http://localhost/api/research-jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          ...submission,
+          niche: "electronics",
+          sourceIds: [],
+          sourceSelection: "automatic",
+        }),
+      }),
+    );
+    expect(unsupported.status).toBe(400);
+    expect((await unsupported.json()) as unknown).toMatchObject({
+      error: { code: "NO_COMPATIBLE_SOURCE" },
+    });
+
+    const incompatible = await createJob(
+      new Request("http://localhost/api/research-jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          ...submission,
+          niche: "electronics",
+          sourceSelection: "manual",
+          sourceIds: ["fixture-skincare-catalog"],
+        }),
+      }),
+    );
+    expect(incompatible.status).toBe(400);
+    expect((await incompatible.json()) as unknown).toMatchObject({
+      error: { code: "SOURCE_NICHE_MISMATCH" },
+    });
+
+    const modeOverride = await createJob(
+      new Request("http://localhost/api/research-jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          ...submission,
+          mode: "live",
+          sourceSelection: "automatic",
+          sourceIds: [],
+        }),
+      }),
+    );
+    expect(modeOverride.status).toBe(400);
+    expect((await modeOverride.json()) as unknown).toMatchObject({
+      error: { code: "MODE_MISMATCH" },
+    });
+  });
+
   it("lists only fixture-compatible configured sources", async () => {
     configureFixtureEnvironment();
     const response = await getSources(
