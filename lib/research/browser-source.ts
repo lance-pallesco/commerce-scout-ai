@@ -53,6 +53,7 @@ export function createDefaultBrowserLauncher(
 
 type BrowserCollectionOptions = Readonly<{
   source: SourceDescriptor;
+  niche?: string;
   limit: number;
   headless: boolean;
   timeoutMs: number;
@@ -123,8 +124,8 @@ export async function extractWebScraperCatalogProducts(
 
   const extractionUrl = page.url();
   const rawRecords = await cards.evaluateAll(
-    (elements, maximum) =>
-      elements.slice(0, maximum).map((card, index) => {
+    (elements, options) =>
+      elements.slice(0, options.maximum).map((card, index) => {
         const title = card.querySelector(".title");
         const price = card.querySelector(".price");
         const description = card.querySelector(".description");
@@ -136,12 +137,12 @@ export async function extractWebScraperCatalogProducts(
           name: title?.getAttribute("title") ?? title?.textContent,
           price: price?.textContent,
           description: description?.textContent,
-          category: "electronics",
+          category: options.category,
           sourceUrl: href,
           imageUrl: image instanceof HTMLImageElement ? image.src : null,
         };
       }),
-    limit,
+    { maximum: limit, category: source.canonicalCategory ?? source.supportedCategories[0] },
   );
 
   const normalized = rawRecords
@@ -150,10 +151,131 @@ export async function extractWebScraperCatalogProducts(
   return deduplicateProducts(normalized).products;
 }
 
+export async function extractStructuredSearchProducts(
+  page: Page,
+  source: SourceDescriptor,
+  limit: number,
+): Promise<ProductCandidate[]> {
+  const extractionUrl = page.url();
+  const category = source.canonicalCategory ?? source.supportedCategories[0];
+  const rawRecords = await page.evaluate(
+    ({ maximum, fallbackCategory }) => {
+      type RecordShape = {
+        externalId?: string | null;
+        name?: string | null;
+        description?: string | null;
+        category?: string | null;
+        price?: string | number | null;
+        sourceUrl?: string | null;
+        imageUrl?: string | null;
+      };
+      const records: RecordShape[] = [];
+      const add = (record: RecordShape) => {
+        if (record.name && records.length < maximum) records.push(record);
+      };
+      const visitJson = (value: unknown) => {
+        if (Array.isArray(value)) {
+          value.forEach(visitJson);
+          return;
+        }
+        if (!value || typeof value !== "object") return;
+        const candidate = value as Record<string, unknown>;
+        if (candidate["@graph"]) visitJson(candidate["@graph"]);
+        if (candidate["@type"] === "Product" || candidate["@type"] === "ProductGroup") {
+          const offers = candidate.offers as Record<string, unknown> | undefined;
+          const image = Array.isArray(candidate.image) ? candidate.image[0] : candidate.image;
+          add({
+            externalId: typeof candidate.sku === "string" ? candidate.sku : typeof candidate.productID === "string" ? candidate.productID : null,
+            name: typeof candidate.name === "string" ? candidate.name : null,
+            description: typeof candidate.description === "string" ? candidate.description : null,
+            category: typeof candidate.category === "string" ? candidate.category : fallbackCategory,
+            price: typeof offers?.price === "number" || typeof offers?.price === "string" ? offers.price : null,
+            sourceUrl: typeof candidate.url === "string" ? candidate.url : null,
+            imageUrl: typeof image === "string" ? image : null,
+          });
+        }
+      };
+      document.querySelectorAll('script[type="application/ld+json"]').forEach((script) => {
+        try { visitJson(JSON.parse(script.textContent ?? "")); } catch { /* ignore malformed publisher JSON */ }
+      });
+      // Some approved retailers expose their server-rendered listing model in an
+      // inline JSON payload rather than JSON-LD or visible cards. Read only
+      // product URLs on the allowlisted page and keep the surrounding price
+      // text as provenance; never execute the payload as code.
+      if (records.length < maximum) {
+        const html = document.documentElement.outerHTML.replaceAll('\\"', '"').replaceAll('\\/', '/');
+        const visiblePrices = Array.from(html.matchAll(/\$\s*(\d{1,4}(?:\.\d{2})?)/g)).map((entry) => entry[1]);
+        const productPattern = /"title":"([^"]{2,200})","url":"(https:[^"]+\/p\/[^"\\]+)"/g;
+        let match: RegExpExecArray | null;
+        while (records.length < maximum && (match = productPattern.exec(html))) {
+          const context = html.slice(Math.max(0, match.index - 20_000), match.index + 20_000);
+          const price = context.match(/(?:price|current_retail_price|formatted_price)[^0-9$]{0,80}\$?\s*(\d{1,4}(?:\.\d{2})?)/i)?.[1]
+            ?? context.match(/\$\s*(\d{1,4}(?:\.\d{2})?)/)?.[1]
+            ?? visiblePrices[records.length]
+            ?? null;
+          add({
+            externalId: match[2],
+            name: match[1],
+            description: null,
+            category: fallbackCategory,
+            price,
+            sourceUrl: match[2].replaceAll('\\/', '/'),
+            imageUrl: null,
+          });
+        }
+      }
+      const selectors = [
+        '[data-at="product_tile"]',
+        '[data-testid*="product"]',
+        'article',
+        'li.product-item',
+        '.product-item',
+      ];
+      for (const card of Array.from(document.querySelectorAll(selectors.join(",")))) {
+        if (records.length >= maximum) break;
+        const anchor = card.querySelector("a[href]") as HTMLAnchorElement | null;
+        const nameNode = card.querySelector("[data-at*='product'], [data-testid*='product-name'], .product-name, h2, h3, h4") ?? anchor;
+        const text = card.textContent?.replace(/\s+/g, " ").trim() ?? "";
+        const priceMatch = text.match(/(?:USD|US\$|\$)\s?\d+(?:[.,]\d{1,2})?/i);
+        const image = card.querySelector("img") as HTMLImageElement | null;
+        add({
+          externalId: anchor?.href ?? null,
+          name: nameNode?.textContent?.trim() ?? null,
+          description: null,
+          category: fallbackCategory,
+          price: priceMatch?.[0] ?? null,
+          sourceUrl: anchor?.href ?? null,
+          imageUrl: image?.src ?? null,
+        });
+      }
+      return records.slice(0, maximum);
+    },
+    { maximum: limit, fallbackCategory: category },
+  );
+
+  const normalized = rawRecords
+    .map((record) => {
+      try {
+        if (!record.sourceUrl) return null;
+        const url = new URL(record.sourceUrl, extractionUrl);
+        if (url.protocol !== "https:" || !source.allowedHosts.includes(url.hostname)) return null;
+        return normalizeProduct(
+          { ...record, sourceUrl: url.toString() } as RawProductRecord,
+          source.id,
+          extractionUrl,
+        );
+      } catch {
+        return null;
+      }
+    })
+    .filter((product): product is ProductCandidate => product !== null);
+  return deduplicateProducts(normalized).products;
+}
+
 export async function collectWebScraperCatalogProducts(
   options: BrowserCollectionOptions,
 ): Promise<{ products: ProductCandidate[]; extractedCount: number; duplicateCount: number }> {
-  const { source, limit, timeoutMs, maxPages } = options;
+  const { source, niche, limit, timeoutMs, maxPages } = options;
   if (source.type !== "browser" || !source.baseUrl || maxPages < 1) {
     throw new BrowserCollectionError(
       "SOURCE_EXTRACTION_FAILED",
@@ -188,11 +310,18 @@ export async function collectWebScraperCatalogProducts(
       page.setDefaultTimeout(timeoutMs);
       assertNotAborted(options.signal);
       stage = "navigation";
-      await page.goto(source.baseUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+      const targetUrl = source.collectionStrategy === "structured-search" && source.searchUrlTemplate
+        ? source.searchUrlTemplate.replace("{query}", encodeURIComponent(niche ?? source.supportedCategories[0]))
+        : source.baseUrl;
+      if (!targetUrl) throw new BrowserCollectionError("SOURCE_EXTRACTION_FAILED", "The approved source has no collection URL.");
+      await assertApprovedSourceUrl(targetUrl, source);
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
       assertNotAborted(options.signal);
       await assertApprovedSourceUrl(page.url(), source);
       stage = "extraction";
-      const products = await extractWebScraperCatalogProducts(page, source, limit);
+      const products = source.collectionStrategy === "structured-search"
+        ? await extractStructuredSearchProducts(page, source, limit)
+        : await extractWebScraperCatalogProducts(page, source, limit);
       const deduplicated = deduplicateProducts(products);
 
       return {

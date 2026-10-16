@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { getResearchSource } from "@/lib/research/source-registry";
+import { getResearchSource, listCompatibleResearchSources } from "@/lib/research/source-registry";
 import {
   SourceAccessError,
   assertApprovedSourceUrl,
@@ -33,5 +33,10 @@ describe("browser source policy", () => {
     expect(isPublicInternetAddress("127.0.0.1")).toBe(false);
     expect(isPublicInternetAddress("::1")).toBe(false);
     expect(isPublicInternetAddress("8.8.8.8")).toBe(true);
+  });
+
+  it("matches bounded niche keywords without authorizing unrelated sources", () => {
+    expect(listCompatibleResearchSources("facial serum", "live").map((item) => item.id)).toContain("target-public-skincare");
+    expect(listCompatibleResearchSources("garden tractors", "live")).toEqual([]);
   });
 });

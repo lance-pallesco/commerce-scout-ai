@@ -4,6 +4,10 @@ export const CurrencySchema = z.enum(["USD"]);
 export const ResearchModeSchema = z.enum(["fixtures", "live"]);
 export const SourceSelectionSchema = z.enum(["automatic", "manual"]);
 export const SourceTypeSchema = z.enum(["fixture", "browser"]);
+export const BrowserCollectionStrategySchema = z.enum([
+  "webscraper-catalog",
+  "structured-search",
+]);
 
 export type ResearchMode = z.infer<typeof ResearchModeSchema>;
 export type SourceSelection = z.infer<typeof SourceSelectionSchema>;
@@ -68,6 +72,10 @@ export const SourceDescriptorSchema = z.object({
   allowedCapabilities: z.array(z.enum(["list", "collect", "details"])).min(1),
   baseUrl: z.string().url().optional(),
   allowedHosts: z.array(z.string().min(1).max(255)).default([]),
+  collectionStrategy: BrowserCollectionStrategySchema.default("webscraper-catalog"),
+  searchUrlTemplate: z.string().min(1).max(2_000).optional(),
+  nicheKeywords: z.array(z.string().min(1).max(80)).default([]),
+  canonicalCategory: z.string().min(1).max(80).optional(),
   sourceNotice: z.string().min(1).max(1_000),
 });
 

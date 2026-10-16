@@ -7,9 +7,9 @@ Codex develops and maintains this repository. At runtime, `@anthropic-ai/claude-
 ## What works
 
 - Fixture-mode research: synthetic skincare records are collected, normalized, deduplicated, filtered, scored, persisted, rendered, and exported as CSV without an API key.
-- Browser collection: an allowlisted Playwright adapter can collect from the public Web Scraper demonstration catalog in live mode. It labels that catalog as electronics, never skincare.
+- Browser collection: allowlisted Playwright adapters can collect the Web Scraper electronics demonstration catalog plus public Target skincare and IKEA home search pages for their registered niche keywords. Records retain source URLs and are never presented as fixture evidence.
 - Claude runtime tools: five in-process MCP tools expose approved sources and collected evidence only. Built-in shell, filesystem, and arbitrary browsing tools are disabled.
-- Intelligent source selection: automatic mode resolves all registry-approved sources compatible with the niche and runtime so Claude can choose safely; manual mode remains available for one explicit approved source.
+- Autonomous source selection: the dashboard asks only for niche, price range, and candidate count. The backend resolves compatible registry sources and Claude chooses among the approved MCP tools; no source selector is exposed to ordinary users.
 - Live Claude path: a bounded smoke run has completed against Anthropic using the real Agent SDK, registered MCP tools, Playwright collection, validated structured output, SQLite persistence, and a `claude_agent` report (2 products, 18.3 seconds, $0.0305 estimated cost).
 - Local worker: atomic job claiming, worker leases, cancellation requests, terminal states, events, costs, reports, and product evidence persist to `data/commerce-scout.db`.
 - Dashboard: create a job, monitor genuine persisted status, inspect rankings and score charts, review limitations, view history, and download a CSV.
@@ -70,7 +70,7 @@ npm.cmd run dev
 npm.cmd run worker
 ```
 
-After a key is present, this one-off command creates and processes only a new, small live job. Leave the web app running, but stop or do not start the persistent worker while this command runs: the command is its own worker. It refuses when another job is pending/running and enforces the lower of your configured values or: 5 turns, $0.10 estimated API budget, 90 seconds, one browser page, two electronics records, and the approved Web Scraper demonstration source.
+After a key is present, this one-off command creates and processes only a new, small live electronics job. Leave the web app running, but stop or do not start the persistent worker while this command runs: the command is its own worker. It refuses when another job is pending/running and enforces the lower of your configured values or: 5 turns, $0.10 estimated API budget, 90 seconds, one browser page, two records, and the approved Web Scraper demonstration source.
 
 ```powershell
 npm.cmd run smoke:live
@@ -110,12 +110,12 @@ npm.cmd run build
 - Fixture records are clearly synthetic; they make no market, ad-performance, sales, or profitability claims.
 - The Web Scraper source is a public demonstration catalog, not an authorized ad-intelligence integration.
 - The SQLite MVP uses a local file lock and is designed for one local worker, not multi-host deployment.
-- A live run is intentionally limited to the approved public demonstration catalog. It is not market-demand, sales, or profitability evidence.
+- Public retailer adapters are limited to their registered categories and may change markup, availability, or prices. They are product-page evidence, not market-demand, sales, or profitability evidence. A niche without a compatible registry source is rejected honestly.
 
 ## Verification status (2026-10-16)
 
 - Fixture research is verified end to end: a request is queued, claimed by the worker, collected from local fixture data, deterministically scored, persisted, rendered, and exported.
-- Playwright extraction is verified against deterministic local catalog markup and, with `RUN_LIVE_BROWSER_TESTS=true`, the approved public Web Scraper catalog. The production browser path remains restricted to that approved host.
+- Playwright extraction is verified against deterministic local catalog markup and, with `RUN_LIVE_BROWSER_TESTS=true`, the approved public Web Scraper electronics catalog and Target skincare catalog. The production browser path remains restricted to registry-approved hosts; retailer availability can still change.
 - The live SDK request, MCP registration, strict tool configuration, structured-output validation, cancellation, budget/turn error handling, duplicate-action limit, and no-progress guard have unit coverage. A bounded authenticated live Agent SDK run also completed end to end: Anthropic responded, all five approved MCP tools were registered, `collect_products` persisted two Playwright records, structured output validated, and the report was saved. The dashboard and worker share this same persisted execution path; one manual dashboard-triggered live run remains the final demonstration check.
 - `npm audit` currently reports 12 advisories (2 critical, 9 high, 1 moderate), all through development/build tooling: Vitest/Tinypool, `eslint-config-next` globbing, and the shadcn CLI dependency tree. Available audit remediations require major-version changes; none were applied blindly. See the roadmap before deploying this project.
 

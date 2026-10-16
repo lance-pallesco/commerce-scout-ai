@@ -18,7 +18,7 @@ const SubmissionSchema = z.object({
   requestedProductCount: z.number().int().min(1).max(50),
   sourceIds: z.array(z.string().min(1).max(80)).max(4).default([]),
   sourceSelection: SourceSelectionSchema.default("automatic"),
-  objective: z.string().trim().min(10).max(1_000),
+  objective: z.string().trim().min(10).max(1_000).default("Identify products worth further evidence-based investigation."),
   mode: z.enum(["fixtures", "live"]).optional(),
 });
 

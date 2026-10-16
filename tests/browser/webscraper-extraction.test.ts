@@ -5,6 +5,7 @@ import {
   BrowserCollectionError,
   collectWebScraperCatalogProducts,
   createDefaultBrowserLauncher,
+  extractStructuredSearchProducts,
   extractWebScraperCatalogProducts,
 } from "@/lib/research/browser-source";
 import { getResearchSource } from "@/lib/research/source-registry";
@@ -68,6 +69,48 @@ describe("webscraper product extraction", () => {
     expect(product.missingFields).toEqual(
       expect.arrayContaining(["price", "description", "imageUrl"]),
     );
+  });
+
+  it("extracts allowlisted structured-search product evidence", async () => {
+    const searchSource = getResearchSource("target-public-skincare", "live");
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent(`
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "Product",
+        sku: "serum-1",
+        name: "Evidence Serum",
+        description: "A public product description.",
+        category: "skincare",
+        offers: { price: "29.00" },
+        url: "https://www.target.com/p/evidence-serum/-/A-12345678",
+      })}</script>
+    `);
+
+    const products = await extractStructuredSearchProducts(page, searchSource, 5);
+
+    expect(products).toHaveLength(1);
+    expect(products[0]).toMatchObject({
+      name: "Evidence Serum",
+      price: 29,
+      category: "skincare",
+      sourceId: "target-public-skincare",
+    });
+  });
+
+  it("reads a bounded retailer listing payload without executing it", async () => {
+    const searchSource = getResearchSource("target-public-skincare", "live");
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent(`
+      <main>$29.00</main>
+      <script>window.__listing = {"title":"Payload Serum","url":"https://www.target.com/p/payload-serum/-/A-123"}</script>
+    `);
+
+    const products = await extractStructuredSearchProducts(page, searchSource, 5);
+
+    expect(products).toHaveLength(1);
+    expect(products[0]).toMatchObject({ name: "Payload Serum", price: 29 });
   });
 
   it("fails safely when the expected catalog layout is absent", async () => {

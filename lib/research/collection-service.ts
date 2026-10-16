@@ -37,6 +37,7 @@ export async function collectProducts(
       ? collectFixtureProducts({ niche: input.niche, limit })
       : await collectWebScraperCatalogProducts({
           source,
+          niche: input.niche,
           limit,
           headless: config.browserHeadless,
           timeoutMs: config.browserTimeoutMs,

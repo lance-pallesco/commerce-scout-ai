@@ -22,6 +22,8 @@ const sources = [
     name: "Web Scraper e-commerce practice catalog",
     type: "browser",
     supportedCategories: ["electronics"],
+    nicheKeywords: ["electronics", "earbuds", "headphones", "phone", "laptop", "computer", "gadget"],
+    canonicalCategory: "electronics",
     availability: "available",
     supportedModes: ["live"],
     allowedCapabilities: ["list", "collect", "details"],
@@ -29,6 +31,39 @@ const sources = [
     allowedHosts: ["webscraper.io"],
     sourceNotice:
       "Public demonstration catalog. Its inventory is electronics and must not be represented as skincare evidence.",
+  },
+  {
+    id: "target-public-skincare",
+    name: "Target public skincare catalog",
+    type: "browser",
+    supportedCategories: ["skincare", "beauty"],
+    nicheKeywords: ["skin", "skincare", "serum", "moisturizer", "cleanser", "sunscreen", "facial", "beauty", "makeup", "cosmetic", "cosmetics"],
+    canonicalCategory: "skincare",
+    availability: "available",
+    supportedModes: ["live"],
+    allowedCapabilities: ["list", "collect", "details"],
+    collectionStrategy: "structured-search",
+    baseUrl: "https://www.target.com/c/skin-care-beauty/-/N-5xtzj",
+    allowedHosts: ["www.target.com", "target.com"],
+    sourceNotice:
+      "Public Target skincare catalog pages are used only for product name, price, and provenance evidence. Availability and pricing can change.",
+  },
+  {
+    id: "ikea-public-search",
+    name: "IKEA public home catalog",
+    type: "browser",
+    supportedCategories: ["home", "home-living", "storage", "furniture"],
+    nicheKeywords: ["home", "living", "storage", "furniture", "decor", "kitchen", "office"],
+    canonicalCategory: "home",
+    availability: "available",
+    supportedModes: ["live"],
+    allowedCapabilities: ["list", "collect", "details"],
+    collectionStrategy: "structured-search",
+    baseUrl: "https://www.ikea.com/us/en/search/?q=storage",
+    searchUrlTemplate: "https://www.ikea.com/us/en/search/?q={query}",
+    allowedHosts: ["www.ikea.com", "ikea.com"],
+    sourceNotice:
+      "Public IKEA catalog pages are used only for product name, price, and provenance evidence. Availability and pricing can change.",
   },
 ] as const;
 
@@ -64,14 +99,22 @@ export class SourceRegistryError extends Error {
 }
 
 export function listResearchSources(category?: string): SourceDescriptor[] {
-  const normalizedCategory = category?.trim().toLowerCase();
+  const normalizedCategory = normalizeNiche(category);
   return researchSources.filter(
     (source) =>
       !normalizedCategory ||
-      source.supportedCategories.some(
-        (supportedCategory) => supportedCategory === normalizedCategory,
-      ),
+      sourceSupportsNiche(source, normalizedCategory),
   );
+}
+
+function normalizeNiche(niche?: string): string {
+  return niche?.trim().toLowerCase().replace(/\s+/g, " ") ?? "";
+}
+
+export function sourceSupportsNiche(source: SourceDescriptor, niche: string): boolean {
+  if (source.supportedCategories.includes(niche)) return true;
+  const terms = niche.split(/[^a-z0-9]+/).filter(Boolean);
+  return terms.some((term) => source.nicheKeywords.includes(term));
 }
 
 export function listCompatibleResearchSources(
@@ -147,7 +190,7 @@ export function assertSourceSupportsNiche(
   source: SourceDescriptor,
   niche: string,
 ): void {
-  if (!source.supportedCategories.includes(niche.trim().toLowerCase())) {
+  if (!sourceSupportsNiche(source, normalizeNiche(niche))) {
     throw new SourceRegistryError(
       "SOURCE_NICHE_MISMATCH",
       "The requested source does not support the selected research niche.",
