@@ -16,6 +16,8 @@ export const ResearchJobStageSchema = z.enum([
   "analyzing",
   "scoring",
   "finalizing",
+  "failed",
+  "cancelled",
   "completed",
 ]);
 

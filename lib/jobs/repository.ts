@@ -57,11 +57,18 @@ function parseJob(row: DatabaseRow, database?: Database): ResearchJob {
   const observedCost = storedCost > 0 || !database
     ? storedCost
     : observedCostFromEvents(database, asString(row.id)) ?? storedCost;
+  const status = asString(row.status);
+  const persistedStage = asString(row.current_stage);
+  const currentStage = status === "failed"
+    ? "failed"
+    : status === "cancelled"
+      ? "cancelled"
+      : persistedStage;
   return ResearchJobSchema.parse({
     id: asString(row.id),
     request: JSON.parse(asString(row.request_json)),
-    status: asString(row.status),
-    currentStage: asString(row.current_stage),
+    status,
+    currentStage,
     progressPercent: asNumber(row.progress_percent),
     createdAt: asString(row.created_at),
     startedAt: optionalString(row.started_at),
@@ -376,12 +383,13 @@ export async function finishResearchJob(
     const completedAt = nowIso();
     database.run(
       `UPDATE research_jobs
-        SET status = ?, current_stage = 'completed', progress_percent = 100, completed_at = ?,
+        SET status = ?, current_stage = ?, progress_percent = 100, completed_at = ?,
           estimated_cost_usd = ?, elapsed_time_ms = ?, error_code = ?, sanitized_error_message = ?,
           lease_expires_at = NULL
         WHERE id = ?`,
       [
         input.status,
+        input.status === "failed" ? "failed" : input.status === "cancelled" ? "cancelled" : "completed",
         completedAt,
         input.estimatedCostUsd ?? job.estimatedCostUsd,
         input.elapsedTimeMs ?? job.elapsedTimeMs,
@@ -404,7 +412,7 @@ export async function recoverInterruptedResearchJobs(config: ServerConfig): Prom
     for (const row of expired) {
       database.run(
         `UPDATE research_jobs
-          SET status = 'failed', current_stage = 'completed', progress_percent = 100,
+          SET status = 'failed', current_stage = 'failed', progress_percent = 100,
             completed_at = ?, error_code = 'WORKER_INTERRUPTED',
             sanitized_error_message = 'Research stopped because its worker lease expired.',
             lease_expires_at = NULL
