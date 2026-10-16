@@ -100,6 +100,35 @@ describe("research MCP tools", () => {
     });
   });
 
+  it("requires dynamic discovery before a live catalog fallback", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "skincare",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery", "target-public-skincare"],
+      mode: "live",
+      objective: "Find skincare products with observed prices for further review.",
+    });
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+    });
+    const collect = handlerFor(definitions, "collect_products");
+
+    await expect(
+      collect({ sourceId: "target-public-skincare", niche: "skincare", limit: 2 }),
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "SOURCE_NOT_APPROVED",
+          message: "Attempt discover_products before using a catalog fallback for this live research job.",
+        },
+      },
+    });
+  });
+
   it("collects only job-approved sources and blocks duplicate collection loops", async () => {
     const definitions = createResearchToolDefinitions({ request, config });
     const collect = handlerFor(definitions, "collect_products");

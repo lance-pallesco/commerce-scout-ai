@@ -79,6 +79,7 @@ type MutableResearchToolContext = ResearchToolContext & {
   consecutiveNoProgressActions: number;
   webSearchCostUsd: number;
   webSearchUses: number;
+  webDiscoveryAttempted: boolean;
 };
 
 function safeText(value: unknown): string {
@@ -187,6 +188,7 @@ function buildToolContext(context: ResearchToolContext): MutableResearchToolCont
     consecutiveNoProgressActions: 0,
     webSearchCostUsd: 0,
     webSearchUses: 0,
+    webDiscoveryAttempted: false,
   };
 }
 
@@ -238,6 +240,17 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           throw new AgentToolGuardrailError(
             "SOURCE_NOT_APPROVED",
             "The requested niche does not match this research job.",
+          );
+        }
+        if (
+          state.request.mode === "live" &&
+          state.request.sourceIds.includes("anthropic-web-discovery") &&
+          input.sourceId !== "anthropic-web-discovery" &&
+          !state.webDiscoveryAttempted
+        ) {
+          throw new AgentToolGuardrailError(
+            "SOURCE_NOT_APPROVED",
+            "Attempt discover_products before using a catalog fallback for this live research job.",
           );
         }
         fingerprintAction(state, toolName, input);
@@ -320,6 +333,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         }
         fingerprintAction(state, toolName, input);
         await recordEvent(state, "tool_started", toolName, "Anthropic Web Search request started");
+        state.webDiscoveryAttempted = true;
         const result = await discoverProductsWithWebSearch({
           niche: state.request.niche,
           query: input.query,

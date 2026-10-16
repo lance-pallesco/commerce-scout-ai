@@ -216,7 +216,11 @@ export async function runResearchAgent(
   try {
     if (abortController.signal.aborted) throw interruptionError();
     assertLiveResearchAvailable(options.config);
-    await emit({ type: "agent_started", at: new Date().toISOString() });
+    await emit({
+      type: "agent_started",
+      at: new Date().toISOString(),
+      detail: "Bounded dynamic web discovery MCP tool enabled.",
+    });
     mcp = (options.mcpServerFactory ?? createResearchMcpServer)({
       request: options.request,
       config: options.config,

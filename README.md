@@ -71,6 +71,9 @@ npm.cmd run dev
 npm.cmd run worker
 ```
 
+Restart the worker after pulling or changing research-agent code; the worker is
+a long-lived Node process and does not hot-reload its MCP tool set.
+
 After a key is present, this one-off command creates and processes only a new, small live electronics job. Leave the web app running, but stop or do not start the persistent worker while this command runs: the command is its own worker. It refuses when another job is pending/running and enforces the lower of your configured values or: 5 turns, $0.10 estimated API budget, 90 seconds, one browser page, two records, and the approved Web Scraper demonstration source.
 
 ```powershell
