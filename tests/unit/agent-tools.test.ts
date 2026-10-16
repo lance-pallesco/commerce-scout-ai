@@ -166,7 +166,7 @@ describe("research MCP tools", () => {
         expect.objectContaining({ type: "agent_api_response_observed" }),
         expect.objectContaining({
           type: "agent_terminal_result",
-          detail: "success; structured output received",
+          detail: expect.stringContaining("success; structured output received"),
         }),
         expect.objectContaining({ type: "agent_structured_output_validated" }),
       ]),

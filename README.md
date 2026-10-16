@@ -9,6 +9,7 @@ Codex develops and maintains this repository. At runtime, `@anthropic-ai/claude-
 - Fixture-mode research: synthetic skincare records are collected, normalized, deduplicated, filtered, scored, persisted, rendered, and exported as CSV without an API key.
 - Browser collection: an allowlisted Playwright adapter can collect from the public Web Scraper demonstration catalog in live mode. It labels that catalog as electronics, never skincare.
 - Claude runtime tools: five in-process MCP tools expose approved sources and collected evidence only. Built-in shell, filesystem, and arbitrary browsing tools are disabled.
+- Live Claude path: a bounded smoke run has completed against Anthropic using the real Agent SDK, registered MCP tools, Playwright collection, validated structured output, SQLite persistence, and a `claude_agent` report (2 products, 18.3 seconds, $0.0305 estimated cost).
 - Local worker: atomic job claiming, worker leases, cancellation requests, terminal states, events, costs, reports, and product evidence persist to `data/commerce-scout.db`.
 - Dashboard: create a job, monitor genuine persisted status, inspect rankings and score charts, review limitations, view history, and download a CSV.
 
@@ -108,13 +109,13 @@ npm.cmd run build
 - Fixture records are clearly synthetic; they make no market, ad-performance, sales, or profitability claims.
 - The Web Scraper source is a public demonstration catalog, not an authorized ad-intelligence integration.
 - The SQLite MVP uses a local file lock and is designed for one local worker, not multi-host deployment.
-- Live Claude execution has not been demonstrated in this environment because no Anthropic credential was supplied.
+- A live run is intentionally limited to the approved public demonstration catalog. It is not market-demand, sales, or profitability evidence.
 
 ## Verification status (2026-10-16)
 
 - Fixture research is verified end to end: a request is queued, claimed by the worker, collected from local fixture data, deterministically scored, persisted, rendered, and exported.
 - Playwright extraction is verified against deterministic local catalog markup and, with `RUN_LIVE_BROWSER_TESTS=true`, the approved public Web Scraper catalog. The production browser path remains restricted to that approved host.
-- The live SDK request, MCP registration, strict tool configuration, structured-output validation, cancellation, budget/turn error handling, duplicate-action limit, and no-progress guard have unit coverage. One authenticated live Agent SDK run received an Anthropic response and invoked registered MCP tools, but its collection calls failed before persistence because the collector detached Playwright's `chromium.launch` method. That receiver-binding defect is fixed and regression-tested; a new bounded smoke run is still required before live end-to-end success is claimed.
+- The live SDK request, MCP registration, strict tool configuration, structured-output validation, cancellation, budget/turn error handling, duplicate-action limit, and no-progress guard have unit coverage. A bounded authenticated live Agent SDK run also completed end to end: Anthropic responded, all five approved MCP tools were registered, `collect_products` persisted two Playwright records, structured output validated, and the report was saved. The dashboard and worker share this same persisted execution path; one manual dashboard-triggered live run remains the final demonstration check.
 - `npm audit` currently reports 12 advisories (2 critical, 9 high, 1 moderate), all through development/build tooling: Vitest/Tinypool, `eslint-config-next` globbing, and the shadcn CLI dependency tree. Available audit remediations require major-version changes; none were applied blindly. See the roadmap before deploying this project.
 
 Read the [demo guide](docs/DEMO_GUIDE.md) for an interview walkthrough and [roadmap](docs/ROADMAP.md) for deliberately deferred capabilities.

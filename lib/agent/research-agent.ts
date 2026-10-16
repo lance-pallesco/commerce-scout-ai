@@ -271,7 +271,15 @@ export async function runResearchAgent(
         await emit({
           type: "agent_terminal_result",
           at: new Date().toISOString(),
-          detail: `${message.subtype}; structured output ${hasStructuredOutput ? "received" : "missing"}`,
+          detail: [
+            `${message.subtype}; structured output ${hasStructuredOutput ? "received" : "missing"}`,
+            `${message.num_turns} turns`,
+            Number.isFinite(message.total_cost_usd)
+              ? `${message.total_cost_usd.toFixed(4)} USD estimated`
+              : undefined,
+          ]
+            .filter(Boolean)
+            .join("; "),
         });
         if (hasStructuredOutput) {
           await emit({ type: "agent_structured_output_received", at: new Date().toISOString() });
