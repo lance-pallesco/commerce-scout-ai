@@ -36,7 +36,15 @@ Safety and truthfulness rules:
 export type AgentExecutionEvent =
   | ToolExecutionEvent
   | Readonly<{
-      type: "agent_started" | "agent_completed" | "agent_failed";
+      type:
+        | "agent_started"
+        | "agent_sdk_initialized"
+        | "agent_api_response_observed"
+        | "agent_terminal_result"
+        | "agent_structured_output_received"
+        | "agent_structured_output_validated"
+        | "agent_completed"
+        | "agent_failed";
       at: string;
       detail?: string;
     }>;
@@ -100,6 +108,12 @@ function classifyResult(result: SDKResultMessage): AgentExecutionError | null {
   if (result.subtype === "error_max_budget_usd") {
     return new AgentExecutionError("AGENT_MAX_BUDGET", "Research stopped after reaching its budget limit.");
   }
+  if (result.subtype === "error_max_structured_output_retries") {
+    return new AgentExecutionError(
+      "AGENT_INVALID_OUTPUT",
+      "The research agent could not produce a valid structured report.",
+    );
+  }
   return new AgentExecutionError(
     "AGENT_EXECUTION_FAILED",
     "The research agent could not complete its execution.",
@@ -162,6 +176,7 @@ export async function runResearchAgent(
   const abortController = new AbortController();
   let finalResult: SDKResultMessage | undefined;
   let collectedCandidates: ProductCandidate[] = [];
+  let apiResponseObserved = false;
   let abortReason: "cancelled" | "timeout" | "no_progress" | undefined;
   const propagateCancellation = () => {
     abortReason = "cancelled";
@@ -229,8 +244,38 @@ export async function runResearchAgent(
     });
 
     for await (const message of messages) {
+      if (message.type === "system" && message.subtype === "init") {
+        const registeredResearchTools = message.tools.filter((toolName) =>
+          RESEARCH_ALLOWED_TOOLS.includes(
+            toolName as (typeof RESEARCH_ALLOWED_TOOLS)[number],
+          ),
+        );
+        await emit({
+          type: "agent_sdk_initialized",
+          at: new Date().toISOString(),
+          detail: `${registeredResearchTools.length}/${RESEARCH_ALLOWED_TOOLS.length} approved MCP tools registered`,
+        });
+      }
+      if (message.type === "assistant" && !apiResponseObserved) {
+        apiResponseObserved = true;
+        await emit({
+          type: "agent_api_response_observed",
+          at: new Date().toISOString(),
+          detail: "Anthropic response observed.",
+        });
+      }
       if (message.type === "result") {
         finalResult = message;
+        const hasStructuredOutput =
+          "structured_output" in message && message.structured_output !== undefined;
+        await emit({
+          type: "agent_terminal_result",
+          at: new Date().toISOString(),
+          detail: `${message.subtype}; structured output ${hasStructuredOutput ? "received" : "missing"}`,
+        });
+        if (hasStructuredOutput) {
+          await emit({ type: "agent_structured_output_received", at: new Date().toISOString() });
+        }
       }
       if (abortController.signal.aborted) {
         throw interruptionError();
@@ -249,6 +294,7 @@ export async function runResearchAgent(
     const structuredOutput =
       "structured_output" in finalResult ? finalResult.structured_output : undefined;
     const report = validateReport(structuredOutput, collectedCandidates);
+    await emit({ type: "agent_structured_output_validated", at: new Date().toISOString() });
     await emit({ type: "agent_completed", at: new Date().toISOString() });
 
     return {
@@ -261,7 +307,11 @@ export async function runResearchAgent(
     };
   } catch (error) {
     const failure = toFailure(
-      abortController.signal.aborted ? interruptionError() : error,
+      abortController.signal.aborted
+        ? interruptionError()
+        : finalResult
+          ? (classifyResult(finalResult) ?? error)
+          : error,
       collectedCandidates,
       startedAt,
       finalResult,

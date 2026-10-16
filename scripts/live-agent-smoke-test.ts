@@ -1,6 +1,12 @@
 import { loadEnvConfig } from "@next/env";
 
-import { createLiveSmokeConfig, createLiveSmokeRequest, LIVE_SMOKE_LIMITS } from "@/lib/agent/live-smoke";
+import {
+  createLiveSmokeConfig,
+  createLiveSmokeRequest,
+  inspectLiveSmokeRun,
+  LIVE_SMOKE_LIMITS,
+  type LiveSmokeInspection,
+} from "@/lib/agent/live-smoke";
 import { assertLiveResearchAvailable, getServerConfig } from "@/lib/config/env";
 import {
   createResearchJob,
@@ -11,6 +17,31 @@ import {
   listResearchJobs,
 } from "@/lib/jobs/repository";
 import { runResearchWorkerOnce } from "@/lib/jobs/worker";
+
+function formatDuration(milliseconds: number): string {
+  return `${(milliseconds / 1_000).toFixed(1)}s`;
+}
+
+function printInspection(inspection: LiveSmokeInspection): void {
+  console.log("Live Claude smoke-test summary");
+  console.log(`Job ID: ${inspection.jobId}`);
+  console.log(`Runtime mode: ${inspection.runtimeMode}`);
+  console.log(`SDK initialization: ${inspection.sdkInitialization}`);
+  console.log(`Anthropic request: ${inspection.anthropicRequest}`);
+  console.log(`MCP tools: ${inspection.mcpTools.length ? inspection.mcpTools.join("; ") : "none observed"}`);
+  console.log(`Products collected: ${inspection.productsCollected}`);
+  console.log(`Structured output: ${inspection.structuredOutput}`);
+  console.log(`Persisted report: ${inspection.persistedReport}`);
+  console.log(`Terminal agent status: ${inspection.terminalAgentStatus}`);
+  console.log(`Execution duration: ${formatDuration(inspection.executionDurationMs)}`);
+  console.log(`Estimated API cost: $${inspection.estimatedCostUsd.toFixed(4)}`);
+  if (inspection.failureCategory) {
+    console.log(`Failure category: ${inspection.failureCategory}`);
+  }
+  if (inspection.safeErrorMessage) {
+    console.log(`Safe error: ${inspection.safeErrorMessage}`);
+  }
+}
 
 async function main() {
   loadEnvConfig(process.cwd());
@@ -32,9 +63,6 @@ async function main() {
 
     const job = await createResearchJob(createLiveSmokeRequest(), config);
     const workerResult = await runResearchWorkerOnce(config, "live-agent-smoke-test");
-    if (workerResult.processedJobId !== job.id) {
-      throw new Error("Live smoke test did not claim its own research job.");
-    }
 
     const [completedJob, report, products, events] = await Promise.all([
       getResearchJob(config, job.id),
@@ -42,26 +70,26 @@ async function main() {
       getResearchProducts(config, job.id),
       getJobEvents(config, job.id),
     ]);
-    const reportMode = (report?.report as { mode?: unknown } | undefined)?.mode;
-    const invokedCollectionTool = events.some(
-      (event) =>
-        event.type === "tool_completed" && event.detail?.startsWith("collect_products:"),
-    );
-    if (
-      !completedJob ||
-      !["completed", "partial"].includes(completedJob.status) ||
-      reportMode !== "claude_agent" ||
-      products.length === 0 ||
-      !invokedCollectionTool
-    ) {
-      throw new Error("Live smoke test completed without a validated Claude MCP collection report.");
+    if (!completedJob) {
+      throw new Error("Live smoke test job could not be read after worker execution.");
+    }
+    const inspection = inspectLiveSmokeRun({
+      job: completedJob,
+      report,
+      products,
+      events,
+    });
+    printInspection(inspection);
+    if (workerResult.processedJobId !== job.id) {
+      throw new Error("Live smoke test did not claim its own research job.");
+    }
+    if (!inspection.passed) {
+      throw new Error(
+        `Live smoke verification failed: ${inspection.failureCategory ?? "unknown validation failure"}.`,
+      );
     }
 
     console.log("Live Claude smoke test succeeded.");
-    console.log(`Job ID: ${job.id}`);
-    console.log(`Status: ${completedJob.status}`);
-    console.log(`Collected products: ${products.length}`);
-    console.log(`Estimated API cost: $${completedJob.estimatedCostUsd.toFixed(4)}`);
     console.log(`Boundaries: <=${LIVE_SMOKE_LIMITS.maxTurns} turns, <=$${LIVE_SMOKE_LIMITS.maxBudgetUsd.toFixed(2)} budget, <=${LIVE_SMOKE_LIMITS.timeoutMs / 1_000}s timeout, ${LIVE_SMOKE_LIMITS.maxPages} browser page.`);
   } catch (error) {
     const message = error instanceof Error ? error.message.replace(/[\r\n]+/g, " ") : "Unknown smoke-test failure.";

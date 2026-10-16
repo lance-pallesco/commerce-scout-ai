@@ -5,8 +5,13 @@ import { getServerConfig } from "@/lib/config/env";
 import {
   RESEARCH_AGENT_SYSTEM_PROMPT,
   runResearchAgent,
+  type AgentExecutionEvent,
 } from "@/lib/agent/research-agent";
-import { createResearchMcpServer, createResearchToolDefinitions } from "@/lib/agent/research-tools";
+import {
+  RESEARCH_ALLOWED_TOOLS,
+  createResearchMcpServer,
+  createResearchToolDefinitions,
+} from "@/lib/agent/research-tools";
 import { collectFixtureProducts } from "@/lib/research/fixture-source";
 import { ResearchRequestSchema } from "@/lib/research/contracts";
 
@@ -101,6 +106,7 @@ describe("research MCP tools", () => {
   it("uses a restricted SDK request and validates mocked structured output", async () => {
     const candidates = collectFixtureProducts({ niche: "skincare", limit: 5 }).products;
     let capturedOptions: Record<string, unknown> | undefined;
+    const events: AgentExecutionEvent[] = [];
     const agentResult = {
       type: "result",
       subtype: "success",
@@ -128,7 +134,16 @@ describe("research MCP tools", () => {
       config,
       queryExecutor: async function* ({ options }) {
         capturedOptions = options as unknown as Record<string, unknown>;
+        yield {
+          type: "system",
+          subtype: "init",
+          tools: RESEARCH_ALLOWED_TOOLS,
+        } as unknown as SDKMessage;
+        yield { type: "assistant" } as unknown as SDKMessage;
         yield agentResult;
+      },
+      onEvent: (event) => {
+        events.push(event);
       },
       mcpServerFactory: () => ({
         server: {} as ReturnType<typeof createResearchMcpServer>["server"],
@@ -142,6 +157,20 @@ describe("research MCP tools", () => {
       strictMcpConfig: true,
       permissionMode: "dontAsk",
     });
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "agent_sdk_initialized",
+          detail: "5/5 approved MCP tools registered",
+        }),
+        expect.objectContaining({ type: "agent_api_response_observed" }),
+        expect.objectContaining({
+          type: "agent_terminal_result",
+          detail: "success; structured output received",
+        }),
+        expect.objectContaining({ type: "agent_structured_output_validated" }),
+      ]),
+    );
   });
 
   it("reports agent turn exhaustion accurately", async () => {
@@ -160,6 +189,31 @@ describe("research MCP tools", () => {
     });
 
     expect(result).toMatchObject({ status: "failed", errorCode: "AGENT_MAX_TURNS" });
+  });
+
+  it("retains an SDK terminal error category when the single-shot iterator throws afterward", async () => {
+    const result = await runResearchAgent({
+      request,
+      config,
+      queryExecutor: async function* () {
+        yield {
+          type: "result",
+          subtype: "error_max_structured_output_retries",
+          is_error: true,
+          total_cost_usd: 0.01,
+          num_turns: 2,
+          errors: ["Output did not validate."],
+        } as unknown as SDKMessage;
+        throw new Error("SDK ends a single-shot iterator after an error result.");
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      errorCode: "AGENT_INVALID_OUTPUT",
+      estimatedCostUsd: 0.01,
+      turns: 2,
+    });
   });
 
   it("classifies an already-aborted caller signal as cancellation without starting a query", async () => {

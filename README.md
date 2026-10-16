@@ -74,7 +74,7 @@ After a key is present, this one-off command creates and processes only a new, s
 npm.cmd run smoke:live
 ```
 
-It succeeds only after a real `claude_agent` report, persisted products, and a logged `collect_products` MCP tool completion are present. It never prints the key. The smoke command itself is the worker for this single request; do not run it until you accept the bounded Anthropic API and approved-source request.
+It succeeds only after a real `claude_agent` report, persisted products, a validated structured output, and a logged `collect_products` MCP tool completion are present. It never prints the key. On either outcome it prints a sanitized summary of SDK initialization, observable Anthropic response state, invoked MCP tools, output validation, persistence, terminal status, duration, cost estimate, and failure category. The smoke command itself is the worker for this single request; do not run it until you accept the bounded Anthropic API and approved-source request.
 
 ## Run locally
 
@@ -113,8 +113,8 @@ npm.cmd run build
 ## Verification status (2026-10-16)
 
 - Fixture research is verified end to end: a request is queued, claimed by the worker, collected from local fixture data, deterministically scored, persisted, rendered, and exported.
-- Playwright extraction is verified against deterministic local catalog markup and the production browser path is restricted to the approved Web Scraper host. The optional external smoke test was not run here, so no real external product extraction is claimed.
-- The live SDK request, MCP registration, strict tool configuration, structured-output validation, cancellation, budget/turn error handling, duplicate-action limit, and no-progress guard have unit coverage. A genuine Anthropic API-backed Claude tool call is blocked by the missing `ANTHROPIC_API_KEY` and is not represented as verified.
+- Playwright extraction is verified against deterministic local catalog markup and, with `RUN_LIVE_BROWSER_TESTS=true`, the approved public Web Scraper catalog. The production browser path remains restricted to that approved host.
+- The live SDK request, MCP registration, strict tool configuration, structured-output validation, cancellation, budget/turn error handling, duplicate-action limit, and no-progress guard have unit coverage. One authenticated live Agent SDK run received an Anthropic response and invoked registered MCP tools, but its collection calls failed before persistence because the collector detached Playwright's `chromium.launch` method. That receiver-binding defect is fixed and regression-tested; a new bounded smoke run is still required before live end-to-end success is claimed.
 - `npm audit` currently reports 12 advisories (2 critical, 9 high, 1 moderate), all through development/build tooling: Vitest/Tinypool, `eslint-config-next` globbing, and the shadcn CLI dependency tree. Available audit remediations require major-version changes; none were applied blindly. See the roadmap before deploying this project.
 
 Read the [demo guide](docs/DEMO_GUIDE.md) for an interview walkthrough and [roadmap](docs/ROADMAP.md) for deliberately deferred capabilities.

@@ -14,6 +14,7 @@ import {
 
 export class BrowserCollectionError extends Error {
   readonly code:
+    | "BROWSER_LAUNCH_FAILED"
     | "BROWSER_TIMEOUT"
     | "SOURCE_EXTRACTION_FAILED"
     | "SOURCE_ACCESS_REJECTED"
@@ -21,6 +22,7 @@ export class BrowserCollectionError extends Error {
 
   constructor(
     code:
+      | "BROWSER_LAUNCH_FAILED"
       | "BROWSER_TIMEOUT"
       | "SOURCE_EXTRACTION_FAILED"
       | "SOURCE_ACCESS_REJECTED"
@@ -33,7 +35,21 @@ export class BrowserCollectionError extends Error {
   }
 }
 
+type BrowserCollectionStage =
+  | "source_validation"
+  | "browser_launch"
+  | "navigation"
+  | "extraction";
+
 export type BrowserLauncher = (options: { headless: boolean }) => Promise<Browser>;
+
+type PlaywrightBrowserType = Pick<typeof chromium, "launch">;
+
+export function createDefaultBrowserLauncher(
+  browserType: PlaywrightBrowserType = chromium,
+): BrowserLauncher {
+  return (options) => browserType.launch(options);
+}
 
 type BrowserCollectionOptions = Readonly<{
   source: SourceDescriptor;
@@ -54,7 +70,10 @@ function assertNotAborted(signal?: AbortSignal): void {
   }
 }
 
-function classifyBrowserError(error: unknown): BrowserCollectionError {
+function classifyBrowserError(
+  error: unknown,
+  stage: BrowserCollectionStage,
+): BrowserCollectionError {
   if (error instanceof BrowserCollectionError) return error;
   if (error instanceof SourceAccessError) {
     return new BrowserCollectionError(
@@ -66,6 +85,18 @@ function classifyBrowserError(error: unknown): BrowserCollectionError {
     return new BrowserCollectionError(
       "BROWSER_TIMEOUT",
       "The configured research source did not respond before the browser timeout.",
+    );
+  }
+  if (stage === "browser_launch") {
+    return new BrowserCollectionError(
+      "BROWSER_LAUNCH_FAILED",
+      "The local browser could not start for the approved research source.",
+    );
+  }
+  if (stage === "navigation") {
+    return new BrowserCollectionError(
+      "SOURCE_EXTRACTION_FAILED",
+      "The approved research source could not be opened in the restricted browser session.",
     );
   }
   return new BrowserCollectionError(
@@ -132,6 +163,7 @@ export async function collectWebScraperCatalogProducts(
 
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
+  let stage: BrowserCollectionStage = "source_validation";
   const stopCollection = () => {
     void context?.close().catch(() => undefined);
   };
@@ -139,7 +171,8 @@ export async function collectWebScraperCatalogProducts(
   try {
     assertNotAborted(options.signal);
     await assertApprovedSourceUrl(source.baseUrl, source);
-    browser = await (options.launchBrowser ?? chromium.launch)({
+    stage = "browser_launch";
+    browser = await (options.launchBrowser ?? createDefaultBrowserLauncher())({
       headless: options.headless,
     });
     context = await browser.newContext();
@@ -154,9 +187,11 @@ export async function collectWebScraperCatalogProducts(
       const page = await context.newPage();
       page.setDefaultTimeout(timeoutMs);
       assertNotAborted(options.signal);
+      stage = "navigation";
       await page.goto(source.baseUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
       assertNotAborted(options.signal);
       await assertApprovedSourceUrl(page.url(), source);
+      stage = "extraction";
       const products = await extractWebScraperCatalogProducts(page, source, limit);
       const deduplicated = deduplicateProducts(products);
 
@@ -175,7 +210,7 @@ export async function collectWebScraperCatalogProducts(
         "Product collection was cancelled.",
       );
     }
-    throw classifyBrowserError(error);
+    throw classifyBrowserError(error, stage);
   } finally {
     options.signal?.removeEventListener("abort", stopCollection);
     await context?.close().catch(() => undefined);

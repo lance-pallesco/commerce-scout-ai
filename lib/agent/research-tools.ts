@@ -7,6 +7,7 @@ import type {
   ResearchRequest,
   SourceDescriptor,
 } from "@/lib/research/contracts";
+import { BrowserCollectionError } from "@/lib/research/browser-source";
 import { collectProducts } from "@/lib/research/collection-service";
 import { getFixtureProductDetails } from "@/lib/research/fixture-source";
 import { deduplicateProducts } from "@/lib/research/normalize";
@@ -197,7 +198,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName, `${sources.length} sources returned`);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName);
+        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
         return toToolFailure(error);
       }
     },
@@ -252,7 +253,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName, `${result.products.length} products collected`);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName);
+        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
         return toToolFailure(error);
       }
     },
@@ -292,7 +293,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName);
+        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
         return toToolFailure(error);
       }
     },
@@ -322,7 +323,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName);
+        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
         return toToolFailure(error);
       }
     },
@@ -357,7 +358,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName);
+        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
         return toToolFailure(error);
       }
     },
@@ -370,8 +371,15 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
   };
 }
 
+function safeFailureCode(error: unknown): string {
+  if (error instanceof AgentToolGuardrailError || error instanceof BrowserCollectionError) {
+    return error.code;
+  }
+  return "RESEARCH_TOOL_FAILED";
+}
+
 function toToolFailure(error: unknown) {
-  if (error instanceof AgentToolGuardrailError) {
+  if (error instanceof AgentToolGuardrailError || error instanceof BrowserCollectionError) {
     return toolFailure(error.code, error.message);
   }
   return toolFailure(

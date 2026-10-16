@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BrowserCollectionError,
   collectWebScraperCatalogProducts,
+  createDefaultBrowserLauncher,
   extractWebScraperCatalogProducts,
 } from "@/lib/research/browser-source";
 import { getResearchSource } from "@/lib/research/source-registry";
@@ -17,6 +18,19 @@ afterEach(async () => {
 });
 
 describe("webscraper product extraction", () => {
+  it("preserves Playwright BrowserType binding for the default launcher", async () => {
+    const browser = {} as Awaited<ReturnType<typeof chromium.launch>>;
+    const browserType = {
+      launch: vi.fn(function (this: unknown, options: { headless: boolean }) {
+        expect(this).toBe(browserType);
+        expect(options).toEqual({ headless: true });
+        return Promise.resolve(browser);
+      }),
+    } as unknown as Pick<typeof chromium, "launch">;
+
+    await expect(createDefaultBrowserLauncher(browserType)({ headless: true })).resolves.toBe(browser);
+  });
+
   it("extracts structured products from a deterministic catalog page", async () => {
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();

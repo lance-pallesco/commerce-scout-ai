@@ -11,7 +11,7 @@
 
 The dashboard distinguishes fixture, live-ready, and live-blocked runtime states. In a completed run, show the persisted execution timeline, collected-record count, evidence coverage, score criterion charts, source links, limitations, and CSV. Scores are evidence-completeness rankings only, never a demand or profitability prediction.
 
-This environment has not run step 8. The verified portfolio walkthrough is the fixture workflow plus local Playwright extraction tests; an interviewer-facing live-agent demonstration requires a bounded real run with a valid key and the documented electronics source.
+The verified portfolio walkthrough is the fixture workflow plus local and approved-source Playwright extraction tests. An initial authenticated smoke run reached Claude and its MCP tools but failed before collection because of a corrected Playwright launcher binding defect; an interviewer-facing live-agent demonstration still requires a newly successful bounded run.
 
 For a safeguard demo, use the unit test `npm.cmd run test:unit` to show the duplicate tool-action and unapproved-source protections. For browser controls, show `npm.cmd run test:browser` and describe the allowlisted host/DNS checks.
 
@@ -20,5 +20,5 @@ For a safeguard demo, use the unit test `npm.cmd run test:unit` to show the dupl
 1. Run `notepad .env.local` and set a real `ANTHROPIC_API_KEY` plus `RESEARCH_MODE=live`. `.env.local` is Git-ignored; do not add the key to a `NEXT_PUBLIC_*` variable.
 2. Ensure the dashboard has no pending or running research job, and stop or do not start the persistent `npm.cmd run worker` process: the smoke command is its own one-off worker.
 3. Run `npm.cmd run smoke:live` from the repository root.
-4. The command uses the real separate-worker path with a 5-turn / $0.10 / 90-second / one-page cap, two electronics records, and only the approved Web Scraper source. It verifies a persisted `claude_agent` report, products, and a `collect_products` MCP event before reporting success.
+4. The command uses the real separate-worker path with a 5-turn / $0.10 / 90-second / one-page cap, two electronics records, and only the approved Web Scraper source. It verifies a persisted `claude_agent` report, validated structured output, products, and a `collect_products` MCP event before reporting success. A safe summary identifies the exact failed boundary without revealing credentials or raw model output.
 5. Use the printed job ID in the dashboard history to inspect the source evidence and tool-event trail. A failed command is not a verified live demonstration.
