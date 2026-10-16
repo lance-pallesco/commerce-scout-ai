@@ -39,7 +39,24 @@ function asNumber(value: SqlValue): number {
   return value;
 }
 
-function parseJob(row: DatabaseRow): ResearchJob {
+function observedCostFromEvents(database: Database, jobId: string): number | null {
+  const [row] = queryRows(
+    database,
+    "SELECT detail FROM research_events WHERE job_id = ? AND type = 'agent_terminal_result' ORDER BY created_at DESC LIMIT 1",
+    [jobId],
+  );
+  const detail = optionalString(row?.detail);
+  const match = detail?.match(/\b(\d+(?:\.\d{1,6})?)\s+USD estimated\b/);
+  if (!match) return null;
+  const cost = Number(match[1]);
+  return Number.isFinite(cost) && cost >= 0 ? cost : null;
+}
+
+function parseJob(row: DatabaseRow, database?: Database): ResearchJob {
+  const storedCost = asNumber(row.estimated_cost_usd);
+  const observedCost = storedCost > 0 || !database
+    ? storedCost
+    : observedCostFromEvents(database, asString(row.id)) ?? storedCost;
   return ResearchJobSchema.parse({
     id: asString(row.id),
     request: JSON.parse(asString(row.request_json)),
@@ -54,7 +71,7 @@ function parseJob(row: DatabaseRow): ResearchJob {
     sanitizedErrorMessage: optionalString(row.sanitized_error_message),
     agentModel: asString(row.agent_model),
     maximumTurns: asNumber(row.maximum_turns),
-    estimatedCostUsd: asNumber(row.estimated_cost_usd),
+    estimatedCostUsd: observedCost,
     elapsedTimeMs: asNumber(row.elapsed_time_ms),
     workerId: optionalString(row.worker_id),
     leaseExpiresAt: optionalString(row.lease_expires_at),
@@ -63,7 +80,7 @@ function parseJob(row: DatabaseRow): ResearchJob {
 
 function jobRow(database: Database, id: string): ResearchJob | null {
   const [row] = queryRows(database, "SELECT * FROM research_jobs WHERE id = ?", [id]);
-  return row ? parseJob(row) : null;
+  return row ? parseJob(row, database) : null;
 }
 
 function nowIso(): string {
@@ -179,7 +196,7 @@ export async function listResearchJobs(
       database,
       "SELECT * FROM research_jobs ORDER BY created_at DESC LIMIT ?",
       [Math.min(Math.max(limit, 1), 100)],
-    ).map(parseJob),
+    ).map((row) => parseJob(row, database)),
   );
 }
 
@@ -258,7 +275,7 @@ export async function claimNextResearchJob(
     }
     if (!candidate) return null;
 
-    const job = parseJob(candidate);
+    const job = parseJob(candidate, database);
     assertJobTransition(job.status, "running");
     const startedAt = nowIso();
     const leaseExpiresAt = new Date(Date.now() + config.agentTimeoutMs + 30_000).toISOString();
@@ -406,29 +423,80 @@ export async function persistResearchResults(
   evaluations: readonly ProductEvaluation[],
 ): Promise<void> {
   await withDatabase(config, (database) => {
-    if (!jobRow(database, jobId)) throw new JobNotFoundError();
+    persistResearchBundleInDatabase(database, jobId, products, evaluations);
+  });
+}
+
+type ResearchReportInput = {
+  mode: "deterministic_fixture" | "claude_agent";
+  agentReport?: AgentResearchReport;
+  limitations: string[];
+};
+
+function persistResearchBundleInDatabase(
+  database: Database,
+  jobId: string,
+  products: readonly ProductCandidate[],
+  evaluations: readonly ProductEvaluation[],
+  report?: ResearchReportInput,
+): void {
+  if (!jobRow(database, jobId)) throw new JobNotFoundError();
+  database.exec("BEGIN");
+  try {
     database.run("DELETE FROM research_products WHERE job_id = ?", [jobId]);
     const evaluationByProductId = new Map(evaluations.map((evaluation) => [evaluation.productId, evaluation]));
+    const seenProductKeys = new Set<string>();
     for (const product of products) {
+      const provenanceKey = [product.sourceId, product.externalId, product.sourceUrl].join("\u0000");
+      if (seenProductKeys.has(provenanceKey)) continue;
+      seenProductKeys.add(provenanceKey);
+
+      // The database key is an internal record identity. The candidate's id,
+      // externalId, and sourceUrl remain in product_json as provenance and
+      // continue to anchor agent findings and source links.
+      const persistedProductId = randomUUID();
       const createdAt = nowIso();
       database.run(
         "INSERT INTO research_products (id, job_id, product_json, created_at) VALUES (?, ?, ?, ?)",
-        [product.id, jobId, JSON.stringify(product), createdAt],
+        [persistedProductId, jobId, JSON.stringify(product), createdAt],
       );
       for (const evidence of product.evidence) {
         database.run(
           "INSERT INTO product_evidence (id, job_id, product_id, evidence_json, created_at) VALUES (?, ?, ?, ?, ?)",
-          [randomUUID(), jobId, product.id, JSON.stringify(evidence), createdAt],
+          [randomUUID(), jobId, persistedProductId, JSON.stringify(evidence), createdAt],
         );
       }
       const evaluation = evaluationByProductId.get(product.id);
       if (evaluation) {
         database.run(
           "INSERT INTO product_evaluations (product_id, job_id, evaluation_json, created_at) VALUES (?, ?, ?, ?)",
-          [product.id, jobId, JSON.stringify(evaluation), createdAt],
+          [persistedProductId, jobId, JSON.stringify(evaluation), createdAt],
         );
       }
     }
+    if (report) {
+      database.run(
+        `INSERT INTO research_reports (job_id, report_json, created_at) VALUES (?, ?, ?)
+          ON CONFLICT(job_id) DO UPDATE SET report_json = excluded.report_json, created_at = excluded.created_at`,
+        [jobId, JSON.stringify(report), nowIso()],
+      );
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export async function persistResearchBundle(
+  config: ServerConfig,
+  jobId: string,
+  products: readonly ProductCandidate[],
+  evaluations: readonly ProductEvaluation[],
+  report: ResearchReportInput,
+): Promise<void> {
+  await withDatabase(config, (database) => {
+    persistResearchBundleInDatabase(database, jobId, products, evaluations, report);
   });
 }
 
@@ -456,11 +524,7 @@ export async function getResearchProducts(
 export async function persistResearchReport(
   config: ServerConfig,
   jobId: string,
-  report: {
-    mode: "deterministic_fixture" | "claude_agent";
-    agentReport?: AgentResearchReport;
-    limitations: string[];
-  },
+  report: ResearchReportInput,
 ): Promise<PersistedReport> {
   const persisted: PersistedReport = {
     jobId,

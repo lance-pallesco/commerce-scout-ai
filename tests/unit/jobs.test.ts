@@ -5,16 +5,21 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { getServerConfig } from "@/lib/config/env";
 import {
+  appendJobEvent,
   claimNextResearchJob,
   createResearchJob,
+  finishResearchJob,
   getJobEvents,
   getResearchJob,
   getResearchProducts,
   getResearchReport,
+  persistResearchResults,
   requestResearchJobCancellation,
 } from "@/lib/jobs/repository";
 import { runResearchWorkerOnce } from "@/lib/jobs/worker";
 import { ResearchRequestSchema } from "@/lib/research/contracts";
+import { collectFixtureProducts } from "@/lib/research/fixture-source";
+import { evaluateProducts } from "@/lib/scoring/score-product";
 
 const databaseFiles: string[] = [];
 
@@ -90,5 +95,64 @@ describe("SQLite research jobs", () => {
     expect(products).toHaveLength(3);
     expect(products[0].evaluation?.score.total).toBeGreaterThan(0);
     expect(report?.report).toMatchObject({ mode: "deterministic_fixture" });
+  });
+
+  it("uses job-scoped database identities for repeated source products", async () => {
+    const config = testConfig();
+    const first = await createResearchJob(testRequest(), config);
+    const second = await createResearchJob(testRequest(), config);
+
+    await runResearchWorkerOnce(config, "fixture-worker-a");
+    await runResearchWorkerOnce(config, "fixture-worker-b");
+
+    expect(await getResearchJob(config, first.id)).toMatchObject({ status: "completed" });
+    expect(await getResearchJob(config, second.id)).toMatchObject({ status: "completed" });
+    expect(await getResearchProducts(config, first.id)).toHaveLength(3);
+    expect(await getResearchProducts(config, second.id)).toHaveLength(3);
+  });
+
+  it("deduplicates repeated provenance within a job and keeps evaluations linked", async () => {
+    const config = testConfig();
+    const job = await createResearchJob(testRequest(), config);
+    const products = collectFixtureProducts({ niche: "skincare", limit: 5 }).products;
+    const evaluations = evaluateProducts(products, testRequest());
+
+    await persistResearchResults(config, job.id, [...products, products[0]], evaluations);
+
+    const persisted = await getResearchProducts(config, job.id);
+    expect(persisted).toHaveLength(products.length);
+    expect(persisted.every((entry) => entry.evaluation?.productId === entry.product.id)).toBe(true);
+  });
+
+  it("rolls back product persistence when a later product iteration fails", async () => {
+    const config = testConfig();
+    const job = await createResearchJob(testRequest(), config);
+    const product = collectFixtureProducts({ niche: "skincare", limit: 1 }).products[0];
+    const evaluations = evaluateProducts([product], testRequest());
+    const failingProducts = {
+      *[Symbol.iterator]() {
+        yield product;
+        throw new Error("deterministic persistence failure");
+      },
+    } as unknown as readonly typeof product[];
+
+    await expect(persistResearchResults(config, job.id, failingProducts, evaluations)).rejects.toThrow(
+      "deterministic persistence failure",
+    );
+    expect(await getResearchProducts(config, job.id)).toEqual([]);
+  });
+
+  it("retains observed SDK cost when a terminal job step fails", async () => {
+    const config = testConfig();
+    const job = await createResearchJob(testRequest(), config);
+    await appendJobEvent(config, job.id, "agent_terminal_result", "success; 5 turns; 0.0226 USD estimated");
+
+    await finishResearchJob(config, job.id, {
+      status: "failed",
+      errorCode: "RESEARCH_PERSISTENCE_FAILED",
+      sanitizedErrorMessage: "Research results could not be saved safely. No partial records were committed.",
+    });
+
+    expect((await getResearchJob(config, job.id))?.estimatedCostUsd).toBe(0.0226);
   });
 });

@@ -164,6 +164,32 @@ function runMigrations(database: Database): void {
   });
 }
 
+function backfillObservedJobCosts(database: Database): void {
+  const rows = queryRows(
+    database,
+    `SELECT jobs.id, events.detail
+       FROM research_jobs AS jobs
+       JOIN research_events AS events ON events.job_id = jobs.id
+      WHERE jobs.estimated_cost_usd = 0
+        AND events.type = 'agent_terminal_result'
+      ORDER BY events.created_at DESC`,
+  );
+  const updated = new Set<string>();
+  for (const row of rows) {
+    const jobId = typeof row.id === "string" ? row.id : null;
+    const detail = typeof row.detail === "string" ? row.detail : null;
+    if (!jobId || updated.has(jobId) || !detail) continue;
+    const match = detail.match(/\b(\d+(?:\.\d{1,6})?)\s+USD estimated\b/);
+    const cost = match ? Number(match[1]) : NaN;
+    if (!Number.isFinite(cost) || cost < 0) continue;
+    database.run(
+      "UPDATE research_jobs SET estimated_cost_usd = ? WHERE id = ? AND estimated_cost_usd = 0",
+      [cost, jobId],
+    );
+    updated.add(jobId);
+  }
+}
+
 export async function withDatabase<T>(
   config: Pick<ServerConfig, "databaseUrl">,
   operation: (database: Database) => Promise<T> | T,
@@ -184,6 +210,7 @@ export async function withDatabase<T>(
     database = bytes ? new Sql.Database(bytes) : new Sql.Database();
     database.exec("PRAGMA foreign_keys = ON");
     runMigrations(database);
+    backfillObservedJobCosts(database);
     const result = await operation(database);
     const temporaryPath = `${databasePath}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporaryPath, database.export());

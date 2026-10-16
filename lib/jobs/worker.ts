@@ -10,8 +10,7 @@ import {
   claimNextResearchJob,
   finishResearchJob,
   isCancellationRequested,
-  persistResearchReport,
-  persistResearchResults,
+  persistResearchBundle,
   recoverInterruptedResearchJobs,
   renewJobLease,
   sanitizeJobFailure,
@@ -22,6 +21,16 @@ export type WorkerRunResult = Readonly<{
   recoveredJobs: number;
   processedJobId?: string;
 }>;
+
+class ResearchPersistenceError extends Error {
+  readonly estimatedCostUsd: number;
+
+  constructor(estimatedCostUsd: number) {
+    super("Research results could not be saved safely. No partial records were committed.");
+    this.name = "ResearchPersistenceError";
+    this.estimatedCostUsd = estimatedCostUsd;
+  }
+}
 
 function eventDetail(event: AgentExecutionEvent): string | undefined {
   if ("toolName" in event) {
@@ -61,14 +70,17 @@ async function runFixtureResearch(
   );
   await updateJobProgress(config, jobId, { currentStage: "scoring", progressPercent: 65 });
   const evaluations = evaluateProducts(collection.products, job.request);
-  await persistResearchResults(config, jobId, collection.products, evaluations);
-  await persistResearchReport(config, jobId, {
-    mode: "deterministic_fixture",
-    limitations: [
-      "This report uses synthetic local fixture data and does not demonstrate a live Claude or market-data run.",
-      "Scores measure observed evidence completeness and price/niche fit only; they do not predict sales or profitability.",
-    ],
-  });
+  try {
+    await persistResearchBundle(config, jobId, collection.products, evaluations, {
+      mode: "deterministic_fixture",
+      limitations: [
+        "This report uses synthetic local fixture data and does not demonstrate a live Claude or market-data run.",
+        "Scores measure observed evidence completeness and price/niche fit only; they do not predict sales or profitability.",
+      ],
+    });
+  } catch {
+    throw new ResearchPersistenceError(0);
+  }
   return {
     status: collection.products.length > 0 ? ("completed" as const) : ("partial" as const),
     estimatedCostUsd: 0,
@@ -110,12 +122,15 @@ async function runClaudeResearch(
 
   await updateJobProgress(config, jobId, { currentStage: "scoring", progressPercent: 75 });
   const evaluations = evaluateProducts(agent.candidates, job.request, agent.report);
-  await persistResearchResults(config, jobId, agent.candidates, evaluations);
-  await persistResearchReport(config, jobId, {
-    mode: "claude_agent",
-    agentReport: agent.report,
-    limitations: agent.report?.limitations ?? ["The agent did not return a report."],
-  });
+  try {
+    await persistResearchBundle(config, jobId, agent.candidates, evaluations, {
+      mode: "claude_agent",
+      agentReport: agent.report,
+      limitations: agent.report?.limitations ?? ["The agent did not return a report."],
+    });
+  } catch {
+    throw new ResearchPersistenceError(agent.estimatedCostUsd);
+  }
   return agent;
 }
 
@@ -160,11 +175,19 @@ export async function runResearchWorkerOnce(
     const cancellationRequested = await isCancellationRequested(config, job.id);
     await finishResearchJob(config, job.id, {
       status: cancellationRequested ? "cancelled" : "failed",
+      estimatedCostUsd:
+        error instanceof ResearchPersistenceError ? error.estimatedCostUsd : undefined,
       elapsedTimeMs: Date.now() - startedAt,
-      errorCode: cancellationRequested ? "JOB_CANCELLED" : "WORKER_EXECUTION_FAILED",
+      errorCode: cancellationRequested
+        ? "JOB_CANCELLED"
+        : error instanceof ResearchPersistenceError
+          ? "RESEARCH_PERSISTENCE_FAILED"
+          : "WORKER_EXECUTION_FAILED",
       sanitizedErrorMessage: cancellationRequested
         ? "Research execution was cancelled."
-        : sanitizeJobFailure(error),
+        : error instanceof ResearchPersistenceError
+          ? error.message
+          : sanitizeJobFailure(error),
     });
     await appendJobEvent(config, job.id, "job_failed", "Research worker stopped before completion.");
   } finally {
