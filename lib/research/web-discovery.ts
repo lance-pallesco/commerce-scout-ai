@@ -26,17 +26,27 @@ export class WebDiscoveryError extends Error {
     | "WEB_SEARCH_UNAVAILABLE"
     | "WEB_SEARCH_LIMIT"
     | "WEB_SEARCH_REQUEST_FAILED"
+    | "WEB_SEARCH_AUTHENTICATION_FAILED"
+    | "WEB_SEARCH_PERMISSION_DENIED"
+    | "WEB_SEARCH_INVALID_REQUEST"
+    | "WEB_SEARCH_RATE_LIMITED"
+    | "WEB_SEARCH_NETWORK_ERROR"
+    | "WEB_SEARCH_CANCELLED"
+    | "WEB_SEARCH_TOOL_FAILED"
     | "WEB_SEARCH_INVALID_RESPONSE"
     | "WEB_SEARCH_NO_RESULTS"
     | "WEB_SEARCH_URL_REJECTED";
+  readonly httpStatus?: number;
 
   constructor(
     code: WebDiscoveryError["code"],
     message: string,
+    options: Readonly<{ httpStatus?: number }> = {},
   ) {
     super(message);
     this.name = "WebDiscoveryError";
     this.code = code;
+    this.httpStatus = options.httpStatus;
   }
 }
 
@@ -78,6 +88,16 @@ function collectSearchResults(content: unknown): { results: SearchResult[]; sear
     }
   }
   return { results, searchUses };
+}
+
+function searchToolErrorCode(content: unknown): string | null {
+  if (!Array.isArray(content)) return null;
+  for (const block of content) {
+    const record = asRecord(block);
+    if (record?.type !== "web_search_tool_result_error") continue;
+    return textValue(record.error_code, 80) ?? "unknown";
+  }
+  return null;
 }
 
 function textValue(value: unknown, maximum: number): string | null {
@@ -132,12 +152,16 @@ export async function discoverProductsWithWebSearch(input: Readonly<{
     );
   }
   if (input.signal?.aborted) {
-    throw new WebDiscoveryError("WEB_SEARCH_REQUEST_FAILED", "Web discovery was cancelled.");
+    throw new WebDiscoveryError("WEB_SEARCH_CANCELLED", "Web discovery was cancelled.");
   }
 
   const query = `${input.niche} ${input.query}`.replace(/\s+/g, " ").trim().slice(0, 240);
   const maxUses = Math.max(1, Math.min(input.config.webSearchMaxUses, input.maxUses ?? input.config.webSearchMaxUses));
   const fetchImpl = input.fetchImpl ?? fetch;
+  const requestController = new AbortController();
+  const abortFromCaller = () => requestController.abort();
+  input.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timeout = setTimeout(() => requestController.abort(), input.config.webSearchTimeoutMs);
   let response: Response;
   try {
     response = await fetchImpl(WEB_SEARCH_ENDPOINT, {
@@ -163,29 +187,68 @@ export async function discoverProductsWithWebSearch(input: Readonly<{
             type: WEB_SEARCH_TOOL_TYPE,
             name: "web_search",
             max_uses: maxUses,
+            allowed_callers: ["direct"],
           },
         ],
       }),
-      signal: input.signal,
+      signal: requestController.signal,
     });
   } catch (error) {
+    clearTimeout(timeout);
+    input.signal?.removeEventListener("abort", abortFromCaller);
     if (input.signal?.aborted) {
-      throw new WebDiscoveryError("WEB_SEARCH_REQUEST_FAILED", "Web discovery was cancelled.");
+      throw new WebDiscoveryError("WEB_SEARCH_CANCELLED", "Web discovery was cancelled.");
+    }
+    if (requestController.signal.aborted) {
+      throw new WebDiscoveryError(
+        "WEB_SEARCH_NETWORK_ERROR",
+        `Anthropic Web Search timed out after ${Math.round(input.config.webSearchTimeoutMs / 1_000)} seconds.`,
+      );
     }
     throw new WebDiscoveryError(
-      "WEB_SEARCH_REQUEST_FAILED",
+      "WEB_SEARCH_NETWORK_ERROR",
       error instanceof Error && /timeout|network|fetch/i.test(error.message)
         ? "Anthropic Web Search could not be reached."
         : "Anthropic Web Search request failed.",
     );
   }
+  clearTimeout(timeout);
+  input.signal?.removeEventListener("abort", abortFromCaller);
 
   if (!response.ok) {
+    const status = response.status;
+    if (status === 401) {
+      throw new WebDiscoveryError(
+        "WEB_SEARCH_AUTHENTICATION_FAILED",
+        "Anthropic rejected the Web Search credential (HTTP 401). Check ANTHROPIC_API_KEY.",
+        { httpStatus: status },
+      );
+    }
+    if (status === 403) {
+      throw new WebDiscoveryError(
+        "WEB_SEARCH_PERMISSION_DENIED",
+        "Anthropic denied Web Search for this account (HTTP 403). Enable Web Search for the Anthropic organization or use an account with access.",
+        { httpStatus: status },
+      );
+    }
+    if (status === 429) {
+      throw new WebDiscoveryError(
+        "WEB_SEARCH_RATE_LIMITED",
+        "Anthropic Web Search is rate limited (HTTP 429). Retry after the bounded worker delay.",
+        { httpStatus: status },
+      );
+    }
+    if (status === 400) {
+      throw new WebDiscoveryError(
+        "WEB_SEARCH_INVALID_REQUEST",
+        "Anthropic rejected the Web Search request (HTTP 400). Verify the configured model supports Web Search and that the organization permits it.",
+        { httpStatus: status },
+      );
+    }
     throw new WebDiscoveryError(
       "WEB_SEARCH_REQUEST_FAILED",
-      response.status === 401 || response.status === 403
-        ? "Anthropic Web Search authentication was rejected."
-        : `Anthropic Web Search returned HTTP ${response.status}.`,
+      `Anthropic Web Search returned HTTP ${status}.`,
+      { httpStatus: status },
     );
   }
 
@@ -196,6 +259,13 @@ export async function discoverProductsWithWebSearch(input: Readonly<{
     throw new WebDiscoveryError("WEB_SEARCH_INVALID_RESPONSE", "Anthropic Web Search returned invalid JSON.");
   }
   const parsed = asRecord(payload);
+  const toolError = searchToolErrorCode(parsed?.content);
+  if (toolError) {
+    throw new WebDiscoveryError(
+      "WEB_SEARCH_TOOL_FAILED",
+      `Anthropic Web Search returned a safe tool error (${toolError}).`,
+    );
+  }
   const extracted = collectSearchResults(parsed?.content);
   const searchUses = Math.min(maxUses, extracted.searchUses);
   if (searchUses <= 0 || extracted.results.length === 0) {

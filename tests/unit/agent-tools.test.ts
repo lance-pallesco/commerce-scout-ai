@@ -129,6 +129,80 @@ describe("research MCP tools", () => {
     });
   });
 
+  it("reserves bounded Web Search uses when Claude issues parallel discovery calls", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "camping lantern",
+      minimumPrice: 10,
+      maximumPrice: 100,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find portable camping lantern products with observed prices.",
+    });
+    const liveConfig = getServerConfig({
+      RESEARCH_MODE: "live",
+      ANTHROPIC_API_KEY: "test-key",
+      WEB_SEARCH_MAX_USES: "2",
+    });
+    let releaseRequest: (() => void) | undefined;
+    const requestStarted = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: liveConfig,
+      webSearchFetch: async () => {
+        releaseRequest?.();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return new Response(JSON.stringify({ content: [] }), { status: 200 });
+      },
+    });
+    const discover = handlerFor(definitions, "discover_products");
+    const first = discover({ niche: "camping lantern", query: "portable lantern", limit: 1 });
+    await requestStarted;
+    const second = await discover({ niche: "camping lantern", query: "rechargeable lantern", limit: 1 });
+    expect(second).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "TOOL_ACTION_LIMIT" } },
+    });
+    await expect(first).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "WEB_SEARCH_NO_RESULTS" } },
+    });
+  });
+
+  it("persists an actionable sanitized Web Search failure detail", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "beauty",
+      minimumPrice: 10,
+      maximumPrice: 50,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find beauty products with observed prices.",
+    });
+    const events: AgentExecutionEvent[] = [];
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+      onEvent: (event) => {
+        events.push(event);
+      },
+      webSearchFetch: async () => new Response("not logged", { status: 403 }),
+    });
+    const discover = handlerFor(definitions, "discover_products");
+
+    await discover({ niche: "beauty", query: "lip balm", limit: 2 });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_failed",
+        toolName: "discover_products",
+        detail: expect.stringContaining("WEB_SEARCH_PERMISSION_DENIED: Anthropic denied Web Search"),
+      }),
+    );
+    expect(events.some((event) => event.detail?.includes("not logged"))).toBe(false);
+  });
+
   it("collects only job-approved sources and blocks duplicate collection loops", async () => {
     const definitions = createResearchToolDefinitions({ request, config });
     const collect = handlerFor(definitions, "collect_products");

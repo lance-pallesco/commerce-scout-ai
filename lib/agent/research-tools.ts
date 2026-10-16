@@ -79,6 +79,7 @@ type MutableResearchToolContext = ResearchToolContext & {
   consecutiveNoProgressActions: number;
   webSearchCostUsd: number;
   webSearchUses: number;
+  webSearchUsesReserved: number;
   webDiscoveryAttempted: boolean;
 };
 
@@ -188,6 +189,7 @@ function buildToolContext(context: ResearchToolContext): MutableResearchToolCont
     consecutiveNoProgressActions: 0,
     webSearchCostUsd: 0,
     webSearchUses: 0,
+    webSearchUsesReserved: 0,
     webDiscoveryAttempted: false,
   };
 }
@@ -214,7 +216,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName, `${sources.length} sources returned`);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
+        await recordEvent(state, "tool_failed", toolName, safeFailureDetail(error));
         return toToolFailure(error);
       }
     },
@@ -287,7 +289,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         );
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
+        await recordEvent(state, "tool_failed", toolName, safeFailureDetail(error));
         return toToolFailure(error);
       }
     },
@@ -318,7 +320,8 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             "The requested niche does not match this research job.",
           );
         }
-        const remainingSearchUses = state.config.webSearchMaxUses - state.webSearchUses;
+        const remainingSearchUses =
+          state.config.webSearchMaxUses - state.webSearchUses - state.webSearchUsesReserved;
         if (remainingSearchUses <= 0) {
           throw new AgentToolGuardrailError(
             "TOOL_ACTION_LIMIT",
@@ -334,18 +337,27 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         fingerprintAction(state, toolName, input);
         await recordEvent(state, "tool_started", toolName, "Anthropic Web Search request started");
         state.webDiscoveryAttempted = true;
-        const result = await discoverProductsWithWebSearch({
-          niche: state.request.niche,
-          query: input.query,
-          minimumPrice: state.request.minimumPrice,
-          maximumPrice: state.request.maximumPrice,
-          limit: Math.min(input.limit, state.request.requestedProductCount),
-          config: state.config,
-          maxUses: remainingSearchUses,
-          signal: state.signal,
-          fetchImpl: state.webSearchFetch,
-          resolveAddresses: state.webSearchResolveAddresses,
-        });
+        // Reserve the remaining bounded uses before awaiting the network call.
+        // Claude may issue parallel MCP calls; reserving here prevents those
+        // calls from exceeding the server-side search budget.
+        state.webSearchUsesReserved += remainingSearchUses;
+        let result: Awaited<ReturnType<typeof discoverProductsWithWebSearch>>;
+        try {
+          result = await discoverProductsWithWebSearch({
+            niche: state.request.niche,
+            query: input.query,
+            minimumPrice: state.request.minimumPrice,
+            maximumPrice: state.request.maximumPrice,
+            limit: Math.min(input.limit, state.request.requestedProductCount),
+            config: state.config,
+            maxUses: remainingSearchUses,
+            signal: state.signal,
+            fetchImpl: state.webSearchFetch,
+            resolveAddresses: state.webSearchResolveAddresses,
+          });
+        } finally {
+          state.webSearchUsesReserved -= remainingSearchUses;
+        }
         state.webSearchCostUsd += result.estimatedCostUsd;
         state.webSearchUses += result.searchUses;
         if (state.webSearchCostUsd > state.config.agentMaxBudgetUsd) {
@@ -378,7 +390,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           collectionStatus: "completed" as const,
         });
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
+        await recordEvent(state, "tool_failed", toolName, safeFailureDetail(error));
         return toToolFailure(error);
       }
     },
@@ -418,7 +430,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
+        await recordEvent(state, "tool_failed", toolName, safeFailureDetail(error));
         return toToolFailure(error);
       }
     },
@@ -448,7 +460,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
+        await recordEvent(state, "tool_failed", toolName, safeFailureDetail(error));
         return toToolFailure(error);
       }
     },
@@ -483,7 +495,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);
       } catch (error) {
-        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
+        await recordEvent(state, "tool_failed", toolName, safeFailureDetail(error));
         return toToolFailure(error);
       }
     },
@@ -497,15 +509,15 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
   };
 }
 
-function safeFailureCode(error: unknown): string {
+function safeFailureDetail(error: unknown): string {
   if (
     error instanceof AgentToolGuardrailError ||
     error instanceof BrowserCollectionError ||
     error instanceof WebDiscoveryError
   ) {
-    return error.code;
+    return `${error.code}: ${error.message.slice(0, 240)}`;
   }
-  return "RESEARCH_TOOL_FAILED";
+  return "RESEARCH_TOOL_FAILED: The research tool could not complete safely.";
 }
 
 function toToolFailure(error: unknown) {

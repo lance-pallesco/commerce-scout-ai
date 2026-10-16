@@ -65,7 +65,56 @@ describe("Anthropic web discovery", () => {
     expect(result.searchUses).toBe(1);
     expect(result.estimatedCostUsd).toBeGreaterThan(0.01);
     expect(requestBody).toMatchObject({
-      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+      tools: [{
+        type: "web_search_20250305",
+        name: "web_search",
+        max_uses: 2,
+        allowed_callers: ["direct"],
+      }],
+    });
+  });
+
+  it("classifies safe HTTP failures without retaining response bodies", async () => {
+    await expect(
+      discoverProductsWithWebSearch({
+        niche: "beauty",
+        query: "lip balm",
+        minimumPrice: 5,
+        maximumPrice: 40,
+        limit: 2,
+        config,
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ error: { message: "secret response details" } }), {
+            status: 403,
+          }),
+      }),
+    ).rejects.toMatchObject({
+      code: "WEB_SEARCH_PERMISSION_DENIED",
+      message: expect.stringContaining("HTTP 403"),
+      httpStatus: 403,
+    });
+  });
+
+  it("surfaces Anthropic server-tool errors separately from an empty result set", async () => {
+    await expect(
+      discoverProductsWithWebSearch({
+        niche: "beauty",
+        query: "lip balm",
+        minimumPrice: 5,
+        maximumPrice: 40,
+        limit: 2,
+        config,
+        fetchImpl: async () =>
+          response([
+            {
+              type: "web_search_tool_result_error",
+              error_code: "unavailable",
+            },
+          ]),
+      }),
+    ).rejects.toMatchObject({
+      code: "WEB_SEARCH_TOOL_FAILED",
+      message: expect.stringContaining("unavailable"),
     });
   });
 

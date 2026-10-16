@@ -44,6 +44,7 @@ const ServerConfigSchema = z.object({
   WEB_SEARCH_MAX_USES: positiveInteger(1, 2, 2),
   WEB_SEARCH_MAX_RESULTS: positiveInteger(1, 20, 10),
   WEB_SEARCH_MAX_TOKENS: positiveInteger(256, 4_096, 1_200),
+  WEB_SEARCH_TIMEOUT_MS: positiveInteger(1_000, 120_000, 30_000),
   MAX_CONCURRENT_RESEARCH_JOBS: positiveInteger(1, 4, 1),
   BROWSER_HEADLESS: booleanSetting(true),
   BROWSER_TIMEOUT_MS: positiveInteger(1_000, 120_000, 15_000),
@@ -71,6 +72,7 @@ export type ServerConfig = Readonly<{
   webSearchMaxUses: number;
   webSearchMaxResults: number;
   webSearchMaxTokens: number;
+  webSearchTimeoutMs: number;
   maxConcurrentResearchJobs: number;
   browserHeadless: boolean;
   browserTimeoutMs: number;
@@ -114,6 +116,7 @@ export function getServerConfig(
     webSearchMaxUses: config.WEB_SEARCH_MAX_USES,
     webSearchMaxResults: config.WEB_SEARCH_MAX_RESULTS,
     webSearchMaxTokens: config.WEB_SEARCH_MAX_TOKENS,
+    webSearchTimeoutMs: config.WEB_SEARCH_TIMEOUT_MS,
     maxConcurrentResearchJobs: config.MAX_CONCURRENT_RESEARCH_JOBS,
     browserHeadless: config.BROWSER_HEADLESS,
     browserTimeoutMs: config.BROWSER_TIMEOUT_MS,

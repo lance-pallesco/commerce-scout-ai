@@ -150,12 +150,19 @@ export async function runResearchWorkerOnce(
 
   const abortController = new AbortController();
   const startedAt = Date.now();
+  let monitorBusy = false;
+  let monitorFailed = false;
   const monitor = setInterval(async () => {
+    if (monitorBusy) return;
+    monitorBusy = true;
     try {
       if (await isCancellationRequested(config, job.id)) abortController.abort();
       else await renewJobLease(config, job.id, workerId);
     } catch {
+      monitorFailed = true;
       abortController.abort();
+    } finally {
+      monitorBusy = false;
     }
   }, 500);
 
@@ -166,19 +173,48 @@ export async function runResearchWorkerOnce(
         ? await runFixtureResearch(config, job.id, abortController.signal)
         : await runClaudeResearch(config, job.id, abortController.signal);
     const cancellationRequested = await isCancellationRequested(config, job.id);
-    const status = cancellationRequested ? "cancelled" : execution.status;
+    const healthcheckFailed = monitorFailed && !cancellationRequested;
+    if (healthcheckFailed) {
+      await appendJobEvent(
+        config,
+        job.id,
+        "worker_healthcheck_failed",
+        "The worker health check stopped this run before completion.",
+      );
+    }
+    const status = healthcheckFailed
+      ? "failed"
+      : cancellationRequested
+        ? "cancelled"
+        : execution.status;
     await updateJobProgress(config, job.id, { currentStage: "finalizing", progressPercent: 95 });
     await finishResearchJob(config, job.id, {
       status,
       estimatedCostUsd: execution.estimatedCostUsd,
       elapsedTimeMs: Date.now() - startedAt,
-      errorCode: "errorCode" in execution ? execution.errorCode : undefined,
-      sanitizedErrorMessage:
-        "sanitizedErrorMessage" in execution ? execution.sanitizedErrorMessage : undefined,
+      errorCode: healthcheckFailed
+        ? "WORKER_HEALTHCHECK_FAILED"
+        : "errorCode" in execution
+          ? execution.errorCode
+          : undefined,
+      sanitizedErrorMessage: healthcheckFailed
+        ? "The worker health check stopped this run before completion."
+        : "sanitizedErrorMessage" in execution
+          ? execution.sanitizedErrorMessage
+          : undefined,
     });
     await appendJobEvent(config, job.id, "job_finished", `Research finished with status ${status}.`);
   } catch (error) {
     const cancellationRequested = await isCancellationRequested(config, job.id);
+    const healthcheckFailed = monitorFailed && !cancellationRequested;
+    if (healthcheckFailed) {
+      await appendJobEvent(
+        config,
+        job.id,
+        "worker_healthcheck_failed",
+        "The worker health check stopped this run before completion.",
+      );
+    }
     await finishResearchJob(config, job.id, {
       status: cancellationRequested ? "cancelled" : "failed",
       estimatedCostUsd:
@@ -186,14 +222,18 @@ export async function runResearchWorkerOnce(
       elapsedTimeMs: Date.now() - startedAt,
       errorCode: cancellationRequested
         ? "JOB_CANCELLED"
-        : error instanceof ResearchPersistenceError
-          ? "RESEARCH_PERSISTENCE_FAILED"
-          : "WORKER_EXECUTION_FAILED",
+        : healthcheckFailed
+          ? "WORKER_HEALTHCHECK_FAILED"
+          : error instanceof ResearchPersistenceError
+            ? "RESEARCH_PERSISTENCE_FAILED"
+            : "WORKER_EXECUTION_FAILED",
       sanitizedErrorMessage: cancellationRequested
         ? "Research execution was cancelled."
-        : error instanceof ResearchPersistenceError
-          ? error.message
-          : sanitizeJobFailure(error),
+        : healthcheckFailed
+          ? "The worker health check stopped this run before completion."
+          : error instanceof ResearchPersistenceError
+            ? error.message
+            : sanitizeJobFailure(error),
     });
     await appendJobEvent(config, job.id, "job_failed", "Research worker stopped before completion.");
   } finally {

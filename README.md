@@ -64,6 +64,12 @@ RESEARCH_MODE=live
 
 The web server automatically loads `.env.local`. The separate worker and live smoke command call `loadEnvConfig(process.cwd())` from `@next/env`, so they receive the same server-only variables. `RESEARCH_MODE=fixtures` is the safe default. In live mode without a key, the UI shows **Live runtime blocked** and the API refuses to create a job.
 
+Dynamic Web Search is bounded by `WEB_SEARCH_MAX_USES`, `WEB_SEARCH_MAX_RESULTS`,
+`WEB_SEARCH_MAX_TOKENS`, and `WEB_SEARCH_TIMEOUT_MS` (30 seconds by default).
+When Anthropic rejects or cannot complete a search, the worker persists a
+sanitized category such as permission denied, rate limited, timed out, or server
+tool unavailable; it never stores the response body or credential.
+
 Start the web app and persistent worker in two PowerShell windows:
 
 ```powershell
