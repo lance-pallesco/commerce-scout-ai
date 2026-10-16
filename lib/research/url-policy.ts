@@ -94,6 +94,42 @@ export async function assertApprovedSourceUrl(
   return url;
 }
 
+/**
+ * Validate a URL returned by an observable web-search result before it can be
+ * stored as product provenance. This intentionally does not grant browser
+ * navigation permission; callers must still apply a separate navigation
+ * policy if they fetch the page.
+ */
+export async function assertObservedWebUrl(
+  value: string,
+  resolveAddresses: AddressResolver = resolvePublicAddresses,
+): Promise<URL> {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SourceAccessError();
+  }
+
+  if (
+    url.protocol !== "https:" ||
+    (url.port && url.port !== "443") ||
+    url.username ||
+    url.password ||
+    net.isIP(url.hostname) !== 0 ||
+    !url.hostname.includes(".")
+  ) {
+    throw new SourceAccessError();
+  }
+
+  const addresses = await resolveAddresses(url.hostname.toLowerCase());
+  if (addresses.length === 0 || addresses.some((address) => !isPublicInternetAddress(address))) {
+    throw new SourceAccessError();
+  }
+
+  return url;
+}
+
 export function isAllowedBrowserRequest(value: string, source: SourceDescriptor): boolean {
   try {
     assertAllowedUrl(new URL(value), source);

@@ -14,7 +14,7 @@ export const AgentResearchReportSchema = z.object({
   completion: z.enum(["completed", "partial"]),
   executiveSummary: z.string().trim().min(1).max(2_000),
   limitations: z.array(z.string().trim().min(1).max(800)).max(15),
-  findings: z.array(AgentProductFindingSchema).min(1).max(50),
+  findings: z.array(AgentProductFindingSchema).max(50),
 });
 
 export type AgentProductFinding = z.infer<typeof AgentProductFindingSchema>;

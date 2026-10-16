@@ -3,12 +3,13 @@
 The live runtime agent uses `@anthropic-ai/claude-agent-sdk` and `query()`. It receives a custom system prompt requiring evidence/inference separation and structured draft output. SDK `tools` is an empty array, `strictMcpConfig` is enabled, settings sources are disabled, and the only auto-approved capabilities are these MCP tools:
 
 - `list_research_sources`
+- `discover_products`
 - `collect_products`
 - `get_product_details`
 - `get_research_candidates`
 - `get_research_criteria`
 
-All tools use Zod schemas and execute in-process. They scope reads and collection to the active job's approved source IDs, input niche, optional bounded search phrase, candidate limit, price range, cancellation signal, and duplicate-action limit. Product detail access accepts an already discovered identifier, not an arbitrary URL. Recoverable failures return structured `isError` results without raw exceptions.
+All tools use Zod schemas and execute in-process. `discover_products` makes one bounded Anthropic Messages API Web Search request at a time (two searches maximum per job), validates public HTTPS result URLs, and returns only observed title/snippet/price evidence. It never grants the agent arbitrary URL navigation. The tools scope reads and collection to the active job's approved source IDs, input niche, optional bounded search phrase, candidate limit, price range, cancellation signal, and duplicate-action limit. Product detail access accepts an already discovered identifier, not an arbitrary URL. Recoverable failures return structured `isError` results without raw exceptions.
 
 The agent must first read criteria and sources, collect an approved batch, inspect evidence, and return a structured completion/partial report. The report is rejected if it cites a product not collected for the job. Its narrative is supplemental only: deterministic scoring never accepts model-generated score values.
 

@@ -3,10 +3,11 @@ import { z } from "zod";
 export const CurrencySchema = z.enum(["USD"]);
 export const ResearchModeSchema = z.enum(["fixtures", "live"]);
 export const SourceSelectionSchema = z.enum(["automatic", "manual"]);
-export const SourceTypeSchema = z.enum(["fixture", "browser"]);
+export const SourceTypeSchema = z.enum(["fixture", "browser", "web-search"]);
 export const BrowserCollectionStrategySchema = z.enum([
   "webscraper-catalog",
   "structured-search",
+  "anthropic-web-search",
 ]);
 
 export type ResearchMode = z.infer<typeof ResearchModeSchema>;

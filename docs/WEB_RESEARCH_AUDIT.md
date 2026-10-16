@@ -1,6 +1,7 @@
 # Web research capability audit
 
-**Decision (2026-10-16): built-in WebSearch/WebFetch remain disabled.**
+**Decision (2026-10-16): direct Agent SDK WebSearch/WebFetch remain disabled;
+controlled Web Search discovery is enabled inside one backend MCP tool.**
 
 The installed `@anthropic-ai/claude-agent-sdk` is `0.3.301`. Its bundled
 tool definitions include `WebSearch` and `WebFetch`, so the package can expose
@@ -11,12 +12,18 @@ and a per-request `max_uses` limit for both tools:
 - [Web fetch tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool)
 - [Server-tool domain restrictions](https://platform.claude.com/docs/en/managed-agents/secure-deployment)
 
-That capability is not sufficient for this application to enable the tools
-safely today:
+The Agent SDK capability is not sufficient for the primary agent to enable
+those tools directly, so the implementation keeps the agent's tool surface
+MCP-only and exposes a bounded `discover_products` MCP tool. That tool makes a
+separate Messages API request using the same `ANTHROPIC_API_KEY`, requests
+Anthropic's `web_search_20250305` server tool with a maximum of two searches,
+and validates every returned URL before creating candidates.
+
+Direct Agent SDK WebSearch/WebFetch remain disabled because:
 
 1. `lib/agent/research-agent.ts` deliberately passes `tools: []`,
    `strictMcpConfig: true`, `permissionMode: "dontAsk"`, and an explicit
-   allowlist containing only the five in-process CommerceScout MCP tools. This
+   allowlist containing only the six in-process CommerceScout MCP tools. This
    is required by `AGENTS.md`; built-in browser, shell, and filesystem tools
    are not part of the runtime trust boundary.
 2. The SDK's local `WebSearchInput` type exposes `query`, `allowed_domains`,
@@ -39,23 +46,25 @@ safely today:
 ## Current safe behavior
 
 Claude is still the runtime researcher and orchestrator. It receives only the
-registered MCP tools and can formulate a bounded search phrase for a
-registry-approved searchable adapter. Playwright then navigates only to that
-adapter's HTTPS host allowlist, filters observed products by the submitted
-niche and price range, and returns source-page provenance. Deterministic
-scoring and SQLite persistence remain downstream of that evidence.
+registered MCP tools and can formulate a bounded search phrase for
+`discover_products`. The backend makes the nested Web Search request, treats
+search text as untrusted, validates HTTPS/public-DNS result URLs, extracts
+only observed title/snippet/price evidence, and filters candidates by niche
+and price before returning them to Claude. Deterministic scoring and SQLite
+persistence remain downstream of that evidence. Existing Playwright adapters
+remain available as bounded fallbacks.
 
-This supports genuine query-driven discovery within approved provider
-adapters, including niches that do not have a dedicated catalog category. It
-does **not** claim arbitrary-web discovery. A run with no matching approved
-provider returns a partial/empty result rather than substituting another
+This supports genuine query-driven discovery for niches that do not have a
+dedicated catalog category. Search-result URLs are provenance observations,
+not implicit permission to navigate arbitrary pages. A run with no matching
+evidence returns a partial/empty result rather than substituting another
 category.
 
 ## What would be required to enable built-in web tools later
 
 This should be a separately reviewed feature, not a flag flip. It would need:
 
-- an Agent SDK/API path that exposes a worker-enforced search/fetch quota;
+- a worker-enforced fetch quota if WebFetch is added;
 - a server-side policy for approved domains and redirect validation;
 - capture of WebSearch/WebFetch result blocks and an observable-URL ledger;
 - a Playwright verification tool that accepts only ledger URLs;

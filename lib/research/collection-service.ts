@@ -31,6 +31,9 @@ export async function collectProducts(
   const startedAt = Date.now();
   const source = getResearchSource(input.sourceId, input.mode);
   assertSourceSupportsNiche(source, input.niche);
+  if (source.type === "web-search") {
+    throw new Error("Dynamic web-search sources must be collected through discover_products.");
+  }
   const limit = Math.min(input.limit, 50);
 
   const collected =

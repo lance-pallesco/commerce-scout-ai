@@ -84,7 +84,8 @@ export function inspectLiveSmokeRun(input: Readonly<{
   const collectionSucceeded = events.some(
     (event) =>
       event.type === "tool_completed" &&
-      event.detail?.startsWith("collect_products:"),
+      (event.detail?.startsWith("collect_products:") ||
+        event.detail?.startsWith("discover_products:")),
   );
   const persistedAgentReport = reportMode(report) === "claude_agent";
   const finished = job.status === "completed" || job.status === "partial";

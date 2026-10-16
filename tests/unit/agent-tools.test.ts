@@ -46,6 +46,60 @@ function handlerFor(
 }
 
 describe("research MCP tools", () => {
+  it("routes dynamic discovery through the bounded web-search capability", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "camping lantern",
+      minimumPrice: 10,
+      maximumPrice: 100,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find portable camping lantern products with observed prices.",
+    });
+    const liveConfig = getServerConfig({
+      RESEARCH_MODE: "live",
+      ANTHROPIC_API_KEY: "test-key",
+      WEB_SEARCH_MAX_USES: "2",
+      WEB_SEARCH_MAX_RESULTS: "10",
+      WEB_SEARCH_MAX_TOKENS: "1200",
+    });
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: liveConfig,
+      webSearchFetch: async () =>
+        new Response(
+          JSON.stringify({
+            content: [
+              {
+                type: "web_search_tool_result",
+                search_count: 1,
+                content: [
+                  {
+                    type: "web_search_result",
+                    title: "Rechargeable Camping Lantern",
+                    url: "https://products.example.com/lantern",
+                    snippet: "Portable lantern, price $29.99.",
+                  },
+                ],
+              },
+            ],
+            usage: { input_tokens: 10, output_tokens: 10 },
+          }),
+          { status: 200 },
+        ),
+      webSearchResolveAddresses: async () => ["93.184.216.34"],
+    });
+    const discover = handlerFor(definitions, "discover_products");
+
+    await expect(
+      discover({ niche: "camping lantern", query: "rechargeable portable", limit: 2 }),
+    ).resolves.toMatchObject({
+      structuredContent: {
+        products: [expect.objectContaining({ name: "Rechargeable Camping Lantern", price: 29.99 })],
+      },
+    });
+  });
+
   it("collects only job-approved sources and blocks duplicate collection loops", async () => {
     const definitions = createResearchToolDefinitions({ request, config });
     const collect = handlerFor(definitions, "collect_products");
@@ -161,7 +215,7 @@ describe("research MCP tools", () => {
       expect.arrayContaining([
         expect.objectContaining({
           type: "agent_sdk_initialized",
-          detail: "5/5 approved MCP tools registered",
+          detail: "6/6 approved MCP tools registered",
         }),
         expect.objectContaining({ type: "agent_api_response_observed" }),
         expect.objectContaining({
@@ -189,6 +243,34 @@ describe("research MCP tools", () => {
     });
 
     expect(result).toMatchObject({ status: "failed", errorCode: "AGENT_MAX_TURNS" });
+  });
+
+  it("accepts a truthful partial report when dynamic discovery returns no candidates", async () => {
+    const result = await runResearchAgent({
+      request,
+      config,
+      queryExecutor: async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          total_cost_usd: 0.01,
+          num_turns: 2,
+          structured_output: {
+            completion: "partial",
+            executiveSummary: "No matching evidence was returned by the approved discovery tools.",
+            limitations: ["No verified candidates were found."],
+            findings: [],
+          },
+        } as unknown as SDKMessage;
+      },
+      mcpServerFactory: () => ({
+        server: {} as ReturnType<typeof createResearchMcpServer>["server"],
+        getCandidates: () => [],
+      }),
+    });
+
+    expect(result).toMatchObject({ status: "partial", candidates: [] });
   });
 
   it("retains an SDK terminal error category when the single-shot iterator throws afterward", async () => {

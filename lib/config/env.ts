@@ -41,6 +41,9 @@ const ServerConfigSchema = z.object({
   AGENT_TIMEOUT_MS: positiveInteger(1_000, 600_000, 120_000),
   AGENT_DUPLICATE_ACTION_LIMIT: positiveInteger(1, 5, 2),
   AGENT_NO_PROGRESS_ACTION_LIMIT: positiveInteger(1, 10, 3),
+  WEB_SEARCH_MAX_USES: positiveInteger(1, 2, 2),
+  WEB_SEARCH_MAX_RESULTS: positiveInteger(1, 20, 10),
+  WEB_SEARCH_MAX_TOKENS: positiveInteger(256, 4_096, 1_200),
   MAX_CONCURRENT_RESEARCH_JOBS: positiveInteger(1, 4, 1),
   BROWSER_HEADLESS: booleanSetting(true),
   BROWSER_TIMEOUT_MS: positiveInteger(1_000, 120_000, 15_000),
@@ -65,6 +68,9 @@ export type ServerConfig = Readonly<{
   agentTimeoutMs: number;
   agentDuplicateActionLimit: number;
   agentNoProgressActionLimit: number;
+  webSearchMaxUses: number;
+  webSearchMaxResults: number;
+  webSearchMaxTokens: number;
   maxConcurrentResearchJobs: number;
   browserHeadless: boolean;
   browserTimeoutMs: number;
@@ -105,6 +111,9 @@ export function getServerConfig(
     agentTimeoutMs: config.AGENT_TIMEOUT_MS,
     agentDuplicateActionLimit: config.AGENT_DUPLICATE_ACTION_LIMIT,
     agentNoProgressActionLimit: config.AGENT_NO_PROGRESS_ACTION_LIMIT,
+    webSearchMaxUses: config.WEB_SEARCH_MAX_USES,
+    webSearchMaxResults: config.WEB_SEARCH_MAX_RESULTS,
+    webSearchMaxTokens: config.WEB_SEARCH_MAX_TOKENS,
     maxConcurrentResearchJobs: config.MAX_CONCURRENT_RESEARCH_JOBS,
     browserHeadless: config.BROWSER_HEADLESS,
     browserTimeoutMs: config.BROWSER_TIMEOUT_MS,

@@ -12,10 +12,17 @@ import { collectProducts } from "@/lib/research/collection-service";
 import { getFixtureProductDetails } from "@/lib/research/fixture-source";
 import { deduplicateProducts } from "@/lib/research/normalize";
 import { listResearchSources } from "@/lib/research/source-registry";
+import {
+  discoverProductsWithWebSearch,
+  WebDiscoveryError,
+  type WebSearchFetch,
+} from "@/lib/research/web-discovery";
+import type { AddressResolver } from "@/lib/research/url-policy";
 
 export const RESEARCH_MCP_SERVER_NAME = "commerce_scout_research";
 export const RESEARCH_TOOL_NAMES = [
   "list_research_sources",
+  "discover_products",
   "collect_products",
   "get_product_details",
   "get_research_candidates",
@@ -62,12 +69,16 @@ export type ResearchToolContext = Readonly<{
   signal?: AbortSignal;
   onEvent?: (event: ToolExecutionEvent) => void | Promise<void>;
   onNoProgress?: () => void;
+  webSearchFetch?: WebSearchFetch;
+  webSearchResolveAddresses?: AddressResolver;
 }>;
 
 type MutableResearchToolContext = ResearchToolContext & {
   candidates: ProductCandidate[];
   actionFingerprints: Map<string, number>;
   consecutiveNoProgressActions: number;
+  webSearchCostUsd: number;
+  webSearchUses: number;
 };
 
 function safeText(value: unknown): string {
@@ -174,6 +185,8 @@ function buildToolContext(context: ResearchToolContext): MutableResearchToolCont
     candidates: [],
     actionFingerprints: new Map(),
     consecutiveNoProgressActions: 0,
+    webSearchCostUsd: 0,
+    webSearchUses: 0,
   };
 }
 
@@ -260,6 +273,96 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           `sourceId=${input.sourceId}; ${result.products.length} products collected`,
         );
         return toolSuccess(data);
+      } catch (error) {
+        await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
+        return toToolFailure(error);
+      }
+    },
+    { annotations: { readOnlyHint: true }, alwaysLoad: true },
+  );
+
+  const discoverProductsTool = tool(
+    "discover_products",
+    "Search the live web for product candidates using the bounded Anthropic Web Search capability. Search-result URLs are untrusted evidence and are validated by the backend before they are returned.",
+    {
+      niche: z.string().trim().min(2).max(80).describe("The approved research niche"),
+      query: z.string().trim().min(2).max(120).describe("A focused product-search phrase"),
+      limit: z.number().int().min(1).max(20).describe("Maximum candidates to return"),
+    },
+    async (input) => {
+      const toolName = "discover_products" as const;
+      try {
+        assertActive(state);
+        if (!state.request.sourceIds.includes("anthropic-web-discovery")) {
+          throw new AgentToolGuardrailError(
+            "SOURCE_NOT_APPROVED",
+            "Dynamic web discovery is not approved for this research job.",
+          );
+        }
+        if (input.niche.toLowerCase() !== state.request.niche.toLowerCase()) {
+          throw new AgentToolGuardrailError(
+            "SOURCE_NOT_APPROVED",
+            "The requested niche does not match this research job.",
+          );
+        }
+        const remainingSearchUses = state.config.webSearchMaxUses - state.webSearchUses;
+        if (remainingSearchUses <= 0) {
+          throw new AgentToolGuardrailError(
+            "TOOL_ACTION_LIMIT",
+            "The bounded Web Search request limit for this job has been reached.",
+          );
+        }
+        if (state.webSearchCostUsd + 0.01 > state.config.agentMaxBudgetUsd) {
+          throw new AgentToolGuardrailError(
+            "TOOL_ACTION_LIMIT",
+            "The bounded Web Search request would exceed the configured research budget.",
+          );
+        }
+        fingerprintAction(state, toolName, input);
+        await recordEvent(state, "tool_started", toolName, "Anthropic Web Search request started");
+        const result = await discoverProductsWithWebSearch({
+          niche: state.request.niche,
+          query: input.query,
+          minimumPrice: state.request.minimumPrice,
+          maximumPrice: state.request.maximumPrice,
+          limit: Math.min(input.limit, state.request.requestedProductCount),
+          config: state.config,
+          maxUses: remainingSearchUses,
+          signal: state.signal,
+          fetchImpl: state.webSearchFetch,
+          resolveAddresses: state.webSearchResolveAddresses,
+        });
+        state.webSearchCostUsd += result.estimatedCostUsd;
+        state.webSearchUses += result.searchUses;
+        if (state.webSearchCostUsd > state.config.agentMaxBudgetUsd) {
+          throw new AgentToolGuardrailError(
+            "TOOL_ACTION_LIMIT",
+            "Web Search cost exceeded the configured research budget.",
+          );
+        }
+        const candidateCountBeforeCollection = state.candidates.length;
+        state.candidates = deduplicateProducts([
+          ...state.candidates,
+          ...result.products,
+        ]).products;
+        recordCollectionProgress(state, candidateCountBeforeCollection);
+        await recordEvent(
+          state,
+          "tool_completed",
+          toolName,
+          `${result.searchUses} search request${result.searchUses === 1 ? "" : "s"}; ${result.products.length} products collected; ${result.rejectedUrlCount} URLs rejected; ${result.estimatedCostUsd.toFixed(4)} USD estimated`,
+        );
+        return toolSuccess({
+          products: result.products,
+          metadata: {
+            sourceId: "anthropic-web-discovery",
+            searchUses: result.searchUses,
+            observedUrlCount: result.observedUrlCount,
+            rejectedUrlCount: result.rejectedUrlCount,
+            estimatedCostUsd: result.estimatedCostUsd,
+          },
+          collectionStatus: "completed" as const,
+        });
       } catch (error) {
         await recordEvent(state, "tool_failed", toolName, safeFailureCode(error));
         return toToolFailure(error);
@@ -374,20 +477,29 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
   );
 
   return {
-    tools: [listSources, collectProductsTool, getProductDetails, getCandidates, getCriteria],
+    tools: [listSources, discoverProductsTool, collectProductsTool, getProductDetails, getCandidates, getCriteria],
     getCandidates: () => [...state.candidates],
+    getAdditionalCostUsd: () => state.webSearchCostUsd,
   };
 }
 
 function safeFailureCode(error: unknown): string {
-  if (error instanceof AgentToolGuardrailError || error instanceof BrowserCollectionError) {
+  if (
+    error instanceof AgentToolGuardrailError ||
+    error instanceof BrowserCollectionError ||
+    error instanceof WebDiscoveryError
+  ) {
     return error.code;
   }
   return "RESEARCH_TOOL_FAILED";
 }
 
 function toToolFailure(error: unknown) {
-  if (error instanceof AgentToolGuardrailError || error instanceof BrowserCollectionError) {
+  if (
+    error instanceof AgentToolGuardrailError ||
+    error instanceof BrowserCollectionError ||
+    error instanceof WebDiscoveryError
+  ) {
     return toolFailure(error.code, error.message);
   }
   return toolFailure(
@@ -396,7 +508,13 @@ function toToolFailure(error: unknown) {
   );
 }
 
-export function createResearchMcpServer(context: ResearchToolContext) {
+export type ResearchMcpServer = Readonly<{
+  server: ReturnType<typeof createSdkMcpServer>;
+  getCandidates: () => ProductCandidate[];
+  getAdditionalCostUsd?: () => number;
+}>;
+
+export function createResearchMcpServer(context: ResearchToolContext): ResearchMcpServer {
   const definition = createResearchToolDefinitions(context);
   return {
     server: createSdkMcpServer({
@@ -409,5 +527,6 @@ export function createResearchMcpServer(context: ResearchToolContext) {
       timeout: context.config.browserTimeoutMs,
     }),
     getCandidates: definition.getCandidates,
+    getAdditionalCostUsd: definition.getAdditionalCostUsd,
   };
 }

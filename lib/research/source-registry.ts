@@ -18,6 +18,20 @@ const sources = [
       "Synthetic local data for deterministic development. It contains no live demand, advertising, or sales claims.",
   },
   {
+    id: "anthropic-web-discovery",
+    name: "Anthropic Web Search product discovery",
+    type: "web-search",
+    supportedCategories: ["general-products"],
+    availability: "available",
+    supportedModes: ["live"],
+    allowedCapabilities: ["list", "collect", "details"],
+    searchable: true,
+    collectionStrategy: "anthropic-web-search",
+    allowedHosts: [],
+    sourceNotice:
+      "Dynamic discovery uses Anthropic's bounded Web Search server tool. Search-result URLs are untrusted until validated and are retained only as observed provenance.",
+  },
+  {
     id: "webscraper-ecommerce-demo",
     name: "Web Scraper e-commerce practice catalog",
     type: "browser",

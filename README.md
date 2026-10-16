@@ -8,8 +8,8 @@ Codex develops and maintains this repository. At runtime, `@anthropic-ai/claude-
 
 - Fixture-mode research: synthetic skincare records are collected, normalized, deduplicated, filtered, scored, persisted, rendered, and exported as CSV without an API key.
 - Browser collection: allowlisted Playwright adapters can collect the Web Scraper electronics demonstration catalog plus bounded, query-driven Target and IKEA search pages. Claude may add a focused search phrase, but the backend always appends the submitted niche, enforces approved hosts, filters observed prices, and rejects unrelated records. Records retain source URLs and are never presented as fixture evidence.
-- Claude runtime tools: five in-process MCP tools expose approved sources and collected evidence only. Built-in shell, filesystem, and arbitrary browsing tools are disabled.
-- Built-in Claude `WebSearch`/`WebFetch` are intentionally not enabled: the installed SDK exposes them, but this worker cannot currently enforce the required per-request search budget and provenance/URL policy at the MCP persistence boundary. See [the web-research audit](docs/WEB_RESEARCH_AUDIT.md).
+- Claude runtime tools: six in-process MCP tools expose approved sources, bounded dynamic discovery, and collected evidence only. Built-in shell, filesystem, and arbitrary browsing tools are disabled.
+- Direct Agent SDK `WebSearch`/`WebFetch` remain restricted, but Claude can call the controlled `discover_products` MCP tool. It uses Anthropic's Messages API Web Search with a two-search job cap, validates observed public HTTPS URLs, and sends only niche/price-filtered evidence into the existing pipeline. See [the web-research audit](docs/WEB_RESEARCH_AUDIT.md).
 - Autonomous source selection: the dashboard asks only for niche, price range, and candidate count. The backend resolves compatible registry sources and Claude chooses among the approved MCP tools; no source selector is exposed to ordinary users.
 - Live Claude path: a bounded smoke run has completed against Anthropic using the real Agent SDK, registered MCP tools, Playwright collection, validated structured output, SQLite persistence, and a `claude_agent` report (2 products, 18.3 seconds, $0.0305 estimated cost).
 - Local worker: atomic job claiming, worker leases, cancellation requests, terminal states, events, costs, reports, and product evidence persist to `data/commerce-scout.db`.
@@ -49,7 +49,7 @@ The key stays server-only. The standalone worker loads `.env*` through `@next/en
 
 ## Environment and safe live activation
 
-`.env.example` is the committed reference. `.env.local` is local-only and ignored by Git; this workspace includes a placeholder-only `.env.local` with an empty key. Do not put a key in any `NEXT_PUBLIC_*` variable.
+`.env.example` is the committed reference. `.env.local` is local-only and ignored by Git. Do not put a key in any `NEXT_PUBLIC_*` variable.
 
 Open the local file in Windows PowerShell and change only these two lines when you are ready for a live run:
 
@@ -112,7 +112,7 @@ npm.cmd run build
 - The Web Scraper source is a public demonstration catalog, not an authorized ad-intelligence integration.
 - The SQLite MVP uses a local file lock and is designed for one local worker, not multi-host deployment.
 - Public retailer adapters may change markup, availability, or prices. Searchable adapters can try new niches without a per-niche catalog entry, but a run may still return no matching evidence; the agent reports that limitation instead of substituting another category. Records are product-page evidence, not market-demand, sales, or profitability evidence.
-- The current dynamic-discovery boundary is limited to registry-approved searchable providers. It is not arbitrary-web research; enabling Anthropic server web tools requires the additional policy and provenance work documented in [the web-research audit](docs/WEB_RESEARCH_AUDIT.md).
+- Dynamic discovery is now available through the bounded `anthropic-web-discovery` capability. It does not grant arbitrary browser navigation: only observable, validated search-result URLs become provenance, and Playwright remains restricted to registry-approved hosts.
 
 ## Verification status (2026-10-16)
 

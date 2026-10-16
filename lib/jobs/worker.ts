@@ -108,8 +108,14 @@ async function runClaudeResearch(
       if (event.type === "tool_started" && event.toolName === "collect_products") {
         await updateJobProgress(config, jobId, { currentStage: "collecting", progressPercent: 40 });
       }
+      if (event.type === "tool_started" && event.toolName === "discover_products") {
+        await updateJobProgress(config, jobId, { currentStage: "collecting", progressPercent: 35 });
+      }
       if (event.type === "tool_completed" && event.toolName === "collect_products") {
         await updateJobProgress(config, jobId, { currentStage: "analyzing", progressPercent: 60 });
+      }
+      if (event.type === "tool_completed" && event.toolName === "discover_products") {
+        await updateJobProgress(config, jobId, { currentStage: "analyzing", progressPercent: 55 });
       }
       if (event.type === "tool_completed" && event.toolName === "get_research_candidates") {
         await updateJobProgress(config, jobId, { currentStage: "analyzing", progressPercent: 70 });
