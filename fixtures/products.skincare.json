@@ -1,0 +1,74 @@
+[
+  {
+    "externalId": "serum-nia-10",
+    "name": "Niacinamide 10% Barrier Serum",
+    "description": "Fragrance-free water-based serum with niacinamide and panthenol.",
+    "category": "skincare",
+    "price": "$24.00",
+    "sourceUrl": "https://fixtures.commercescout.local/products/serum-nia-10",
+    "imageUrl": "https://fixtures.commercescout.local/images/serum-nia-10.jpg"
+  },
+  {
+    "externalId": "cleanser-oat",
+    "name": "Gentle Oat Cream Cleanser",
+    "description": "Low-foam cleanser presented as suitable for dry and sensitive skin.",
+    "category": "skincare",
+    "price": "$18.50",
+    "sourceUrl": "https://fixtures.commercescout.local/products/cleanser-oat",
+    "imageUrl": "https://fixtures.commercescout.local/images/cleanser-oat.jpg"
+  },
+  {
+    "externalId": "spf-stick",
+    "name": "Mineral SPF 50 Travel Stick",
+    "description": "Compact zinc oxide sunscreen stick; ingredient percentage is not provided.",
+    "category": "skincare",
+    "price": "$31.00",
+    "sourceUrl": "https://fixtures.commercescout.local/products/spf-stick",
+    "imageUrl": "https://fixtures.commercescout.local/images/spf-stick.jpg"
+  },
+  {
+    "externalId": "eye-masks",
+    "name": "Cooling Hydrogel Eye Masks",
+    "description": "Thirty-pair hydrogel eye-mask jar. No ingredient list supplied.",
+    "category": "beauty",
+    "price": "$17.00",
+    "sourceUrl": "https://fixtures.commercescout.local/products/eye-masks",
+    "imageUrl": "https://fixtures.commercescout.local/images/eye-masks.jpg"
+  },
+  {
+    "externalId": "facial-roller",
+    "name": "Rose Quartz Facial Roller",
+    "description": "Basic facial massage tool with no sourcing or material verification.",
+    "category": "beauty",
+    "price": "$8.00",
+    "sourceUrl": "https://fixtures.commercescout.local/products/facial-roller",
+    "imageUrl": null
+  },
+  {
+    "externalId": "collagen-drink",
+    "name": "Collagen Glow Drink Mix",
+    "description": "Dietary supplement with marketing copy but no product documentation.",
+    "category": "wellness",
+    "price": "$42.00",
+    "sourceUrl": "https://fixtures.commercescout.local/products/collagen-drink",
+    "imageUrl": "https://fixtures.commercescout.local/images/collagen-drink.jpg"
+  },
+  {
+    "externalId": "mystery-toner",
+    "name": "Mystery Botanical Toner",
+    "description": null,
+    "category": "skincare",
+    "price": null,
+    "sourceUrl": "https://fixtures.commercescout.local/products/mystery-toner",
+    "imageUrl": null
+  },
+  {
+    "externalId": "serum-nia-10-copy",
+    "name": "Niacinamide 10% Barrier Serum",
+    "description": "Fragrance-free water-based serum with niacinamide and panthenol.",
+    "category": "skincare",
+    "price": "$24.00",
+    "sourceUrl": "https://fixtures.commercescout.local/products/serum-nia-10",
+    "imageUrl": "https://fixtures.commercescout.local/images/serum-nia-10.jpg"
+  }
+]
