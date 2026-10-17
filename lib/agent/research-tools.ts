@@ -13,6 +13,7 @@ import { getFixtureProductDetails } from "@/lib/research/fixture-source";
 import { deduplicateProducts } from "@/lib/research/normalize";
 import { listResearchSources } from "@/lib/research/source-registry";
 import {
+  discoverySearchResultLimit,
   discoverProductsWithWebSearch,
   estimatedWebSearchCostPerUse,
   WebDiscoveryError,
@@ -375,9 +376,12 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             "The bounded Web Search request limit for this job has been reached.",
           );
         }
-        const maximumSearchResults = Math.min(
+        const requestedCandidateLimit = Math.min(
           input.limit,
           state.request.requestedProductCount,
+        );
+        const maximumSearchResults = discoverySearchResultLimit(
+          requestedCandidateLimit,
           state.config.webSearchMaxResults,
         );
         // One MCP invocation can authorize every remaining provider search
@@ -413,7 +417,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             query: input.query,
             minimumPrice: state.request.minimumPrice,
             maximumPrice: state.request.maximumPrice,
-            limit: Math.min(input.limit, state.request.requestedProductCount),
+            limit: requestedCandidateLimit,
             config: state.config,
             maxUses: remainingSearchUses,
             signal: state.signal,
@@ -467,6 +471,15 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         });
       } catch (error) {
         await recordEvent(state, "tool_failed", toolName, safeFailureDetail(error));
+        if (
+          error instanceof WebDiscoveryError &&
+          state.webSearchUses >= state.config.webSearchMaxUses
+        ) {
+          return toolFailure(
+            error.code,
+            `${error.message} This consumed the remaining Web Search allowance for this job; do not call discover_products again. Complete with the available evidence or report a partial result.`,
+          );
+        }
         return toToolFailure(error);
       }
     },

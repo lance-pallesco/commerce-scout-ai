@@ -128,6 +128,40 @@ describe("live Claude smoke-test boundaries", () => {
     expect(inspection.mcpTools).toContain("collect_products: failed (BROWSER_LAUNCH_FAILED)");
   });
 
+  it("retains the initial no-evidence reason when a bounded retry is blocked", () => {
+    const inspection = inspectLiveSmokeRun({
+      job: { ...liveJob, status: "partial" },
+      report: { report: { mode: "claude_agent" } },
+      products: [],
+      events: [
+        event("agent_sdk_initialized", "6/6 approved MCP tools registered"),
+        event("agent_api_response_observed", "OpenRouter response observed."),
+        event(
+          "tool_failed",
+          "discover_products: WEB_SEARCH_NO_RESULTS: OpenRouter Web Search found no product evidence that met this request.",
+        ),
+        event(
+          "tool_failed",
+          "discover_products: TOOL_ACTION_LIMIT: The bounded Web Search request limit for this job has been reached.",
+        ),
+        event("agent_terminal_result", "success; structured output received"),
+        event("agent_structured_output_received"),
+        event("agent_structured_output_validated"),
+        event("agent_completed"),
+      ],
+    });
+
+    expect(inspection).toMatchObject({
+      passed: false,
+      failureCategory: "WEB_SEARCH_NO_RESULTS",
+      safeErrorMessage:
+        "No provider-observed product evidence matched the requested niche and price range.",
+    });
+    expect(inspection.mcpTools).toContain(
+      "discover_products: failed (WEB_SEARCH_NO_RESULTS: OpenRouter Web Search found no product evidence that met this request.) → failed (TOOL_ACTION_LIMIT: The bounded Web Search request limit for this job has been reached.)",
+    );
+  });
+
   it("preserves the sanitized Anthropic rejection diagnostic in the smoke summary", () => {
     const inspection = inspectLiveSmokeRun({
       job: {

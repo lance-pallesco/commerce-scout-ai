@@ -162,13 +162,75 @@ describe("Anthropic web discovery", () => {
         parameters: {
           engine: "exa",
           max_uses: 2,
-          max_results: 3,
-          max_total_results: 6,
+          max_results: 9,
+          max_total_results: 18,
           max_characters: 2_000,
         },
       }],
     });
     expect(result.estimatedCostUsd).toBe(0.007);
+  });
+
+  it("requests bounded headroom so an out-of-range first hit does not hide a valid candidate", async () => {
+    const limitedOpenRouterConfig = getServerConfig({
+      RESEARCH_MODE: "live",
+      AI_PROVIDER: "openrouter",
+      OPENROUTER_API_KEY: "openrouter-test-key",
+      OPENROUTER_MODEL: "~anthropic/claude-sonnet-latest",
+      WEB_SEARCH_MAX_USES: "1",
+      WEB_SEARCH_MAX_RESULTS: "3",
+      WEB_SEARCH_MAX_TOKENS: "1200",
+    });
+    let requestBody: Record<string, unknown> | undefined;
+
+    const result = await discoverProductsWithWebSearch({
+      niche: "desk organizer",
+      query: "desk organizer",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      // The smoke path needs one persisted candidate, but discovery should
+      // receive the configured three-result ceiling before filtering.
+      limit: 1,
+      config: limitedOpenRouterConfig,
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return openRouterCitationResponse([
+          {
+            type: "url_citation",
+            url_citation: {
+              title: "Desk Organizer",
+              url: "https://products.example.com/too-cheap-organizer",
+              content: "Desk organizer with an observed price of $9.99.",
+            },
+          },
+          {
+            type: "url_citation",
+            url_citation: {
+              title: "Bamboo Desk Organizer",
+              url: "https://products.example.com/bamboo-desk-organizer",
+              content: "Bamboo desk organizer with an observed price of $29.99.",
+            },
+          },
+        ]);
+      },
+      resolveAddresses: async () => ["93.184.216.34"],
+    });
+
+    expect(requestBody).toMatchObject({
+      tools: [{
+        parameters: {
+          max_uses: 1,
+          max_results: 3,
+          max_total_results: 3,
+        },
+      }],
+    });
+    expect(result.products).toEqual([
+      expect.objectContaining({
+        name: "Bamboo Desk Organizer",
+        price: 29.99,
+      }),
+    ]);
   });
 
   it("accepts OpenRouter citations returned through a Chat Completions compatibility envelope", async () => {

@@ -346,7 +346,12 @@ describe("research MCP tools", () => {
       discover({ niche: "camping lantern", query: "portable lantern", limit: 2 }),
     ).resolves.toMatchObject({
       isError: true,
-      structuredContent: { error: { code: "WEB_SEARCH_NO_RESULTS" } },
+      structuredContent: {
+        error: {
+          code: "WEB_SEARCH_NO_RESULTS",
+          message: expect.stringContaining("consumed the remaining Web Search allowance"),
+        },
+      },
     });
     expect(definitions.getAdditionalCostUsd()).toBeGreaterThanOrEqual(0.02);
     await expect(

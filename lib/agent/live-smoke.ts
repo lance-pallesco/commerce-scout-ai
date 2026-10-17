@@ -48,17 +48,34 @@ function summarizeMcpTools(events: readonly PersistedEvent[]): string[] {
         (event.detail === toolName || event.detail?.startsWith(`${toolName}:`)),
     );
     if (toolEvents.length === 0) return [];
-    const latest = toolEvents.at(-1);
-    if (!latest) return [];
-    const detail = eventDetailForTool(latest, toolName);
-    const status =
-      latest.type === "tool_completed"
+    const outcomes = toolEvents.filter(
+      (event) => event.type === "tool_completed" || event.type === "tool_failed",
+    );
+    if (outcomes.length === 0) return [`${toolName}: started`];
+    const statuses = outcomes.map((event) => {
+      const detail = eventDetailForTool(event, toolName);
+      return event.type === "tool_completed"
         ? "completed"
-        : latest.type === "tool_failed"
-          ? `failed${detail ? ` (${detail})` : ""}`
-          : "started";
-    return [`${toolName}: ${status}`];
+        : `failed${detail ? ` (${detail})` : ""}`;
+    });
+    return [`${toolName}: ${statuses.join(" → ")}`];
   });
+}
+
+function collectionFailure(events: readonly PersistedEvent[]): string | null {
+  const relevantFailures = events.filter(
+    (event) =>
+      event.type === "tool_failed" &&
+      (event.detail?.startsWith("collect_products:") ||
+        event.detail?.startsWith("discover_products:")),
+  );
+  const firstWebSearchFailure = relevantFailures.find((event) =>
+    event.detail?.startsWith("discover_products: WEB_SEARCH_"),
+  );
+  const detail = firstWebSearchFailure?.detail ?? relevantFailures[0]?.detail;
+  if (!detail) return null;
+  const match = /^(?:collect_products|discover_products):\s*([A-Z_]+)/.exec(detail);
+  return match?.[1] ?? null;
 }
 
 function reportMode(report: SmokeReport): unknown {
@@ -91,10 +108,11 @@ export function inspectLiveSmokeRun(input: Readonly<{
   );
   const persistedAgentReport = reportMode(report) === "claude_agent";
   const finished = job.status === "completed" || job.status === "partial";
+  const rootCollectionFailure = collectionFailure(events);
   const failureCategory =
     job.errorCode ??
     (!collectionSucceeded
-      ? "MCP_COLLECTION_NOT_COMPLETED"
+      ? rootCollectionFailure ?? "MCP_COLLECTION_NOT_COMPLETED"
       : !outputValidated
         ? "STRUCTURED_OUTPUT_NOT_VALIDATED"
         : !persistedAgentReport
@@ -134,7 +152,10 @@ export function inspectLiveSmokeRun(input: Readonly<{
     executionDurationMs: job.elapsedTimeMs,
     estimatedCostUsd: job.estimatedCostUsd,
     failureCategory,
-    safeErrorMessage: job.sanitizedErrorMessage,
+    safeErrorMessage: job.sanitizedErrorMessage ??
+      (rootCollectionFailure === "WEB_SEARCH_NO_RESULTS"
+        ? "No provider-observed product evidence matched the requested niche and price range."
+        : null),
   };
 }
 
