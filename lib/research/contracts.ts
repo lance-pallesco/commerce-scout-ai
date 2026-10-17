@@ -8,6 +8,13 @@ export const EvidenceStatusSchema = z.enum([
   "source_verified",
   "search_discovery",
   "product_page_verified",
+  "verification_required",
+]);
+export const PriceKindSchema = z.enum(["current", "sale", "regular"]);
+export const PriceObservationMethodSchema = z.enum([
+  "product_json_ld",
+  "product_metadata",
+  "product_microdata",
 ]);
 export const BrowserCollectionStrategySchema = z.enum([
   "webscraper-catalog",
@@ -26,6 +33,17 @@ export const EvidenceSchema = z.object({
   confidence: z.enum(["high", "medium", "low"]),
 });
 
+// Kept alongside the normalized price so a persisted recommendation can show
+// exactly how the selected product/variant price was established.
+export const PriceObservationSchema = z.object({
+  method: PriceObservationMethodSchema,
+  supportingObservation: z.string().min(1).max(500),
+  sourceUrl: z.string().url().max(2_000),
+  selectedVariant: z.string().max(240).nullable(),
+  priceKind: PriceKindSchema,
+  observedAt: z.string().datetime(),
+});
+
 export const ProductCandidateSchema = z.object({
   id: z.string().min(1).max(160),
   sourceId: z.string().min(1).max(80),
@@ -35,6 +53,10 @@ export const ProductCandidateSchema = z.object({
   category: z.string().max(120).nullable(),
   price: z.number().finite().nonnegative().nullable(),
   currency: CurrencySchema.nullable(),
+  listPrice: z.number().finite().nonnegative().nullable().default(null),
+  priceKind: PriceKindSchema.default("current"),
+  variant: z.string().max(240).nullable().default(null),
+  priceObservation: PriceObservationSchema.nullable().default(null),
   sourceUrl: z.string().url().max(2_000),
   imageUrl: z.string().url().max(2_000).nullable(),
   evidence: z.array(EvidenceSchema).max(40),
@@ -45,6 +67,23 @@ export const ProductCandidateSchema = z.object({
 
 export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
 export type EvidenceStatus = z.infer<typeof EvidenceStatusSchema>;
+export type PriceKind = z.infer<typeof PriceKindSchema>;
+export type PriceObservation = z.infer<typeof PriceObservationSchema>;
+
+export function requiresProductPageReverification(product: ProductCandidate): boolean {
+  if (product.evidenceStatus !== "product_page_verified") return false;
+  const observation = product.priceObservation;
+  return !observation ||
+    product.price === null ||
+    product.currency !== "USD" ||
+    observation.sourceUrl !== product.sourceUrl ||
+    !product.evidence.some((evidence) => evidence.field === "product-page verification") ||
+    !product.evidence.some((evidence) => evidence.field === "product-page price observation");
+}
+
+export function isRankableProductCandidate(product: ProductCandidate): boolean {
+  return product.evidenceStatus === "source_verified" || product.evidenceStatus === "product_page_verified";
+}
 
 // A Web Search citation is useful for choosing a bounded product-page check,
 // but it is not itself a product candidate.  In particular, its snippet can

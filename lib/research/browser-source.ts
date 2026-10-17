@@ -56,8 +56,12 @@ export type ProductPageVerificationCode =
   | "PAGE_URL_REJECTED"
   | "PAGE_REDIRECT_REJECTED"
   | "PAGE_UNAVAILABLE"
+  | "PAGE_NOT_PRODUCT_DETAIL"
   | "PAGE_IDENTITY_MISMATCH"
+  | "PAGE_VARIANT_UNRESOLVED"
   | "PAGE_PRICE_NOT_OBSERVED"
+  | "PAGE_PRICE_AMBIGUOUS"
+  | "PAGE_CURRENCY_MISMATCH"
   | "PAGE_PRICE_OUT_OF_RANGE"
   | "PAGE_NICHE_MISMATCH"
   | "PAGE_TIMEOUT"
@@ -72,11 +76,20 @@ export type ProductPageVerification = Readonly<{
 }>;
 
 export type ProductPageStructuredEvidence = Readonly<{
-  source: "json_ld" | "meta";
+  source: "json_ld" | "meta" | "microdata";
   name?: string;
+  sku?: string;
+  variant?: string;
   price?: number;
+  listPrice?: number;
+  priceKind?: "current" | "sale" | "regular";
   currency?: string;
   availability?: string;
+}>;
+
+export type ProductPageStructure = Readonly<{
+  products: ProductPageStructuredEvidence[];
+  pageTypes: string[];
 }>;
 
 export type ProductPageVerificationEvidence = Readonly<{
@@ -85,6 +98,7 @@ export type ProductPageVerificationEvidence = Readonly<{
   title: string;
   bodyText: string;
   structuredProducts?: readonly ProductPageStructuredEvidence[];
+  pageTypes?: readonly string[];
   verifiedAt?: string;
 }>;
 
@@ -120,6 +134,7 @@ type DynamicPageVerificationOptions = Readonly<{
   niche: string;
   minimumPrice: number;
   maximumPrice: number;
+  currency?: "USD";
   headless: boolean;
   timeoutMs: number;
   maxPages: number;
@@ -213,17 +228,6 @@ function textHasProductIdentity(lead: DiscoveryLead, value: string): boolean {
   return matchedTerms.length >= Math.min(2, terms.length);
 }
 
-function hasProductIdentity(lead: DiscoveryLead, pageText: string): boolean {
-  return textHasProductIdentity(lead, pageText);
-}
-
-function observedUsdPrice(pageText: string): number | null {
-  const match = pageText.replace(/,/g, "").match(/(?:US\$|USD|\$)\s*(\d+(?:\.\d{1,2})?)/i);
-  if (!match) return null;
-  const price = Number(match[1]);
-  return Number.isFinite(price) && price >= 0 ? price : null;
-}
-
 function finitePrice(value: unknown): number | undefined {
   if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : undefined;
   if (typeof value !== "string") return undefined;
@@ -254,7 +258,16 @@ function jsonLdNodes(value: unknown): Record<string, unknown>[] {
 }
 
 function isProductType(value: unknown): boolean {
-  return value === "Product" || (Array.isArray(value) && value.includes("Product"));
+  return schemaTypes(value).includes("product");
+}
+
+function schemaTypes(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : [value];
+  return values.flatMap((item) => {
+    const text = boundedText(item, 120)?.toLowerCase();
+    if (!text) return [];
+    return [text.slice(text.lastIndexOf("/") + 1).replace(/^schema:/, "")];
+  });
 }
 
 function offerRecords(value: unknown): Record<string, unknown>[] {
@@ -268,38 +281,82 @@ function offerRecords(value: unknown): Record<string, unknown>[] {
   return record ? [record] : [];
 }
 
+function offerPriceDetails(offer: Record<string, unknown>): Readonly<{
+  price?: number;
+  listPrice?: number;
+  priceKind?: "current" | "sale" | "regular";
+}> {
+  let price = finitePrice(offer.price);
+  let listPrice: number | undefined;
+  let salePrice: number | undefined;
+  for (const specification of offerRecords(offer.priceSpecification)) {
+    const specificationPrice = finitePrice(specification.price);
+    if (specificationPrice === undefined) continue;
+    const priceType = boundedText(specification.priceType, 120)?.toLowerCase() ?? "";
+    if (/(?:list|regular|was)/.test(priceType)) listPrice ??= specificationPrice;
+    if (/sale/.test(priceType)) salePrice ??= specificationPrice;
+  }
+  if (price === undefined) price = salePrice ?? listPrice;
+  if (price === undefined) return {};
+  const priceKind = listPrice !== undefined && listPrice > price
+    ? "sale"
+    : price === listPrice
+      ? "regular"
+      : "current";
+  return { price, ...(listPrice === undefined ? {} : { listPrice }), priceKind };
+}
+
+function productEvidenceFromNode(
+  node: Record<string, unknown>,
+  source: ProductPageStructuredEvidence["source"],
+): ProductPageStructuredEvidence[] {
+  const name = boundedText(node.name, 240);
+  const sku = boundedText(node.sku ?? node.productID, 240);
+  const variant = boundedText(node.color ?? node.model ?? node.size, 240);
+  const offers = offerRecords(node.offers);
+  if (offers.length === 0) {
+    return [{ source, ...(name ? { name } : {}), ...(sku ? { sku } : {}), ...(variant ? { variant } : {}) }];
+  }
+  return offers.map((offer) => {
+    const priceDetails = offerPriceDetails(offer);
+    const currency = boundedText(offer.priceCurrency, 16)?.toUpperCase();
+    const availability = boundedText(offer.availability, 120);
+    return {
+      source,
+      ...(name ? { name } : {}),
+      ...(sku ? { sku } : {}),
+      ...(variant ? { variant } : {}),
+      ...priceDetails,
+      ...(currency ? { currency } : {}),
+      ...(availability ? { availability } : {}),
+    };
+  });
+}
+
 /**
  * Parse only compact, server-rendered product facts. JSON-LD remains
  * untrusted page data: values are normalized and later require URL, identity,
  * availability, niche, and price-range validation before persistence.
  */
-export function extractStructuredProductEvidence(
+export function extractProductPageStructure(
   jsonLdPayloads: readonly string[],
-  metaValues: Readonly<{ price?: string; currency?: string }> = {},
-): ProductPageStructuredEvidence[] {
+  metaValues: Readonly<{
+    price?: string;
+    currency?: string;
+    name?: string;
+    sku?: string;
+    variant?: string;
+    openGraphType?: string;
+  }> = {},
+): ProductPageStructure {
   const structured: ProductPageStructuredEvidence[] = [];
+  const pageTypes = new Set<string>();
   for (const payload of jsonLdPayloads) {
     try {
       for (const node of jsonLdNodes(JSON.parse(payload))) {
+        for (const pageType of schemaTypes(node["@type"])) pageTypes.add(pageType);
         if (!isProductType(node["@type"])) continue;
-        const name = boundedText(node.name, 240);
-        const offers = offerRecords(node.offers);
-        if (offers.length === 0) {
-          structured.push({ source: "json_ld", ...(name ? { name } : {}) });
-          continue;
-        }
-        for (const offer of offers) {
-          const price = finitePrice(offer.price);
-          const currency = boundedText(offer.priceCurrency, 16)?.toUpperCase();
-          const availability = boundedText(offer.availability, 120);
-          structured.push({
-            source: "json_ld",
-            ...(name ? { name } : {}),
-            ...(price === undefined ? {} : { price }),
-            ...(currency ? { currency } : {}),
-            ...(availability ? { availability } : {}),
-          });
-        }
+        structured.push(...productEvidenceFromNode(node, "json_ld"));
       }
     } catch {
       // Invalid JSON-LD is untrusted page data, not a reason to fail the page.
@@ -308,61 +365,190 @@ export function extractStructuredProductEvidence(
   const metaPrice = finitePrice(metaValues.price);
   const metaCurrency = boundedText(metaValues.currency, 16)?.toUpperCase();
   if (metaPrice !== undefined && metaCurrency) {
-    structured.push({ source: "meta", price: metaPrice, currency: metaCurrency });
+    structured.push({
+      source: "meta",
+      price: metaPrice,
+      priceKind: "current",
+      currency: metaCurrency,
+      ...(boundedText(metaValues.name, 240) ? { name: boundedText(metaValues.name, 240) } : {}),
+      ...(boundedText(metaValues.sku, 240) ? { sku: boundedText(metaValues.sku, 240) } : {}),
+      ...(boundedText(metaValues.variant, 240) ? { variant: boundedText(metaValues.variant, 240) } : {}),
+    });
   }
-  return structured;
+  for (const pageType of schemaTypes(metaValues.openGraphType)) pageTypes.add(pageType);
+  return { products: structured, pageTypes: [...pageTypes] };
+}
+
+export function extractStructuredProductEvidence(
+  jsonLdPayloads: readonly string[],
+  metaValues: Readonly<{ price?: string; currency?: string; name?: string; sku?: string; variant?: string; openGraphType?: string }> = {},
+): ProductPageStructuredEvidence[] {
+  return extractProductPageStructure(jsonLdPayloads, metaValues).products;
 }
 
 function isUnavailableStructuredOffer(evidence: ProductPageStructuredEvidence): boolean {
   return /(?:outofstock|soldout|discontinued|notavailable)/i.test(evidence.availability ?? "");
 }
 
-function matchingStructuredProduct(
+function matchingStructuredProducts(
   lead: DiscoveryLead,
   structuredProducts: readonly ProductPageStructuredEvidence[],
-): ProductPageStructuredEvidence | undefined {
-  return structuredProducts.find((item) => item.name && textHasProductIdentity(lead, item.name));
+): ProductPageStructuredEvidence[] {
+  return structuredProducts.filter((item) => item.name && textHasProductIdentity(lead, item.name));
 }
 
-function observedStructuredUsdPrice(
-  lead: DiscoveryLead,
-  structuredProducts: readonly ProductPageStructuredEvidence[],
-  hasPageIdentity: boolean,
-): { price: number; source: "json_ld" | "meta"; name?: string } | undefined {
-  for (const item of structuredProducts) {
-    if (item.price === undefined || item.currency !== "USD") continue;
-    const identityMatches = item.source === "meta"
-      ? hasPageIdentity
-      : Boolean(item.name && textHasProductIdentity(lead, item.name));
-    if (!identityMatches) continue;
-    return {
-      price: item.price,
-      source: item.source,
-      ...(item.name ? { name: item.name } : {}),
-    };
+function requestedVariant(finalUrl: URL): Readonly<{ value: string; label: string }> | null {
+  for (const key of ["sku", "variant", "variantId", "variant_id"]) {
+    const value = boundedText(finalUrl.searchParams.get(key), 240);
+    if (value) return { value, label: `${key.toUpperCase()} ${value}` };
   }
-  return undefined;
+  return null;
 }
 
-async function collectStructuredProductEvidence(page: Page): Promise<ProductPageStructuredEvidence[]> {
+function sourceMethod(source: ProductPageStructuredEvidence["source"]): "product_json_ld" | "product_metadata" | "product_microdata" {
+  return source === "json_ld"
+    ? "product_json_ld"
+    : source === "meta"
+      ? "product_metadata"
+      : "product_microdata";
+}
+
+function priceObservationText(source: ProductPageStructuredEvidence["source"], variant: string | null): string {
+  const location = source === "json_ld"
+    ? "matched primary Product JSON-LD offer"
+    : source === "meta"
+      ? "matched primary product metadata"
+      : "matched scoped Product microdata offer";
+  return variant ? `${location}; selected ${variant}.` : `${location}.`;
+}
+
+function isListingUrl(url: URL): boolean {
+  return /(?:^|\/)(?:collections?|categories|search|bestsellers?)(?:\/|$)|\/(?:q|zgbs)(?:\/|$)/i.test(url.pathname);
+}
+
+function isListingSchema(
+  pageTypes: readonly string[],
+  structuredProducts: readonly ProductPageStructuredEvidence[],
+): boolean {
+  if (pageTypes.some((type) => /^(?:collectionpage|searchresultspage|categorypage)$/i.test(type))) {
+    return true;
+  }
+  // A Product graph attached to an ItemList is not proof that one of those
+  // items is the page's primary product. Reject an item-list graph with
+  // multiple product identities instead of selecting a convenient price.
+  const productNames = new Set(
+    structuredProducts
+      .map((product) => product.name?.toLowerCase())
+      .filter((name): name is string => Boolean(name)),
+  );
+  return pageTypes.some((type) => type.toLowerCase() === "itemlist") && productNames.size > 1;
+}
+
+type ResolvedProductPrice = Readonly<{
+  item: ProductPageStructuredEvidence;
+  price: number;
+  listPrice: number | null;
+  priceKind: "current" | "sale" | "regular";
+  selectedVariant: string | null;
+}>;
+
+function resolveProductPrice(
+  lead: DiscoveryLead,
+  finalUrl: URL,
+  structuredProducts: readonly ProductPageStructuredEvidence[],
+  expectedCurrency: "USD",
+): ResolvedProductPrice | ProductPageVerificationCode {
+  const identityMatches = matchingStructuredProducts(lead, structuredProducts);
+  if (identityMatches.length === 0) return "PAGE_IDENTITY_MISMATCH";
+  const selected = requestedVariant(finalUrl);
+  const selectedMatches = selected
+    ? identityMatches.filter((item) => item.sku === selected.value || item.variant === selected.value)
+    : identityMatches;
+  if (selected && selectedMatches.length === 0) return "PAGE_VARIANT_UNRESOLVED";
+  if (selectedMatches.some(isUnavailableStructuredOffer)) return "PAGE_UNAVAILABLE";
+  const priced = selectedMatches.filter((item) => item.price !== undefined);
+  if (priced.length === 0) return "PAGE_PRICE_NOT_OBSERVED";
+  if (!priced.some((item) => item.currency === expectedCurrency)) return "PAGE_CURRENCY_MISMATCH";
+  const expectedCurrencyPrices = priced.filter((item) => item.currency === expectedCurrency);
+  const prices = new Set(expectedCurrencyPrices.map((item) => item.price));
+  if (prices.size !== 1) return "PAGE_PRICE_AMBIGUOUS";
+  const sourcePriority: Record<ProductPageStructuredEvidence["source"], number> = {
+    json_ld: 0,
+    microdata: 1,
+    meta: 2,
+  };
+  const item = [...expectedCurrencyPrices].sort((left, right) => sourcePriority[left.source] - sourcePriority[right.source])[0];
+  return {
+    item,
+    price: item.price!,
+    listPrice: item.listPrice ?? null,
+    priceKind: item.priceKind ?? "current",
+    selectedVariant: selected?.label ?? item.variant ?? (item.sku ? `SKU ${item.sku}` : null),
+  };
+}
+
+async function collectProductPageEvidence(page: Page): Promise<ProductPageStructure> {
   const jsonLdPayloads = await page
     .locator('script[type="application/ld+json"]')
     .allTextContents()
     .catch(() => [] as string[]);
   const metaValues = await page.locator(
-    'meta[property="product:price:amount"], meta[itemprop="price"], meta[property="product:price:currency"], meta[itemprop="priceCurrency"]',
+    'meta[property="product:price:amount"], meta[property="og:price:amount"], meta[itemprop="price"], meta[property="product:price:currency"], meta[property="og:price:currency"], meta[itemprop="priceCurrency"], meta[itemprop="sku"], meta[property="og:type"]',
   ).evaluateAll((elements) => {
-    const values: { price?: string; currency?: string } = {};
+    const values: { price?: string; currency?: string; sku?: string; openGraphType?: string } = {};
     for (const element of elements) {
       const key = element.getAttribute("property") ?? element.getAttribute("itemprop");
       const value = element.getAttribute("content") ?? element.getAttribute("value") ?? undefined;
       if (!value) continue;
-      if (key === "product:price:amount" || key === "price") values.price ??= value;
-      if (key === "product:price:currency" || key === "priceCurrency") values.currency ??= value;
+      if (key === "product:price:amount" || key === "og:price:amount" || key === "price") values.price ??= value;
+      if (key === "product:price:currency" || key === "og:price:currency" || key === "priceCurrency") values.currency ??= value;
+      if (key === "sku") values.sku ??= value;
+      if (key === "og:type") values.openGraphType ??= value;
     }
     return values;
   }).catch(() => ({}));
-  return extractStructuredProductEvidence(jsonLdPayloads, metaValues);
+  const primaryName = await page.locator("main h1, h1").first().innerText().then((value) => boundedText(value, 240)).catch(() => undefined);
+  const microdataProducts = await page.locator('[itemscope][itemtype*="Product"]').evaluateAll((scopes) =>
+    scopes.slice(0, 12).map((scope) => {
+      const valueFor = (root: Element, property: string): string | undefined => {
+        const element = root.querySelector(`[itemprop="${property}"]`);
+        if (!element) return undefined;
+        return element.getAttribute("content") ?? element.getAttribute("value") ?? element.textContent?.trim() ?? undefined;
+      };
+      const offer = scope.querySelector('[itemprop="offers"]') ?? scope;
+      return {
+        name: valueFor(scope, "name"),
+        sku: valueFor(scope, "sku") ?? valueFor(scope, "productID"),
+        variant: valueFor(scope, "color") ?? valueFor(scope, "model") ?? valueFor(scope, "size"),
+        price: valueFor(offer, "price"),
+        currency: valueFor(offer, "priceCurrency"),
+        availability: valueFor(offer, "availability"),
+      };
+    }),
+  ).catch(() => [] as Array<Record<string, string | undefined>>);
+  const structured = extractProductPageStructure(jsonLdPayloads, { ...metaValues, name: primaryName });
+  const microdata = microdataProducts.flatMap((record) => {
+    const name = boundedText(record.name, 240);
+    const price = finitePrice(record.price);
+    const currency = boundedText(record.currency, 16)?.toUpperCase();
+    const sku = boundedText(record.sku, 240);
+    const variant = boundedText(record.variant, 240);
+    const availability = boundedText(record.availability, 120);
+    return [{
+      source: "microdata" as const,
+      ...(name ? { name } : {}),
+      ...(sku ? { sku } : {}),
+      ...(variant ? { variant } : {}),
+      ...(price === undefined ? {} : { price }),
+      ...(price === undefined ? {} : { priceKind: "current" as const }),
+      ...(currency ? { currency } : {}),
+      ...(availability ? { availability } : {}),
+    }];
+  });
+  return {
+    products: [...structured.products, ...microdata],
+    pageTypes: [...new Set([...structured.pageTypes, ...(microdata.length ? ["product"] : [])])],
+  };
 }
 
 function pageMatchesNiche(pageText: string, niche: string): boolean {
@@ -383,14 +569,16 @@ function verificationFailure(
 }
 
 /**
- * Applies deterministic availability, identity, and price checks to text
- * observed from a product page. The caller must still enforce URL and browser
- * navigation policy before invoking this helper.
+ * Applies deterministic product-detail, identity, variant, and price checks.
+ * Arbitrary body-text prices are intentionally never accepted: product prices
+ * must be tied to a matching Product JSON-LD record, product metadata, or a
+ * scoped Product microdata block. The caller must still enforce URL and
+ * browser navigation policy before invoking this helper.
  */
 export function assessDiscoveredProductPage(
   lead: DiscoveryLead,
   evidence: ProductPageVerificationEvidence,
-  criteria: Readonly<{ niche: string; minimumPrice: number; maximumPrice: number }>,
+  criteria: Readonly<{ niche: string; minimumPrice: number; maximumPrice: number; currency?: "USD" }>,
 ): ProductPageVerification {
   let initialUrl: URL;
   let finalUrl: URL;
@@ -403,6 +591,9 @@ export function assessDiscoveredProductPage(
   if (!sameHostname(initialUrl, finalUrl)) {
     return verificationFailure(lead, "PAGE_REDIRECT_REJECTED");
   }
+  if (isListingUrl(finalUrl) || isListingSchema(evidence.pageTypes ?? [], evidence.structuredProducts ?? [])) {
+    return verificationFailure(lead, "PAGE_NOT_PRODUCT_DETAIL");
+  }
   const pageText = `${evidence.title}\n${evidence.bodyText}`.replace(/\s+/g, " ").trim();
   if (
     evidence.httpStatus === null ||
@@ -413,24 +604,18 @@ export function assessDiscoveredProductPage(
   ) {
     return verificationFailure(lead, "PAGE_UNAVAILABLE");
   }
-  const structuredProducts = evidence.structuredProducts ?? [];
-  const matchingStructured = matchingStructuredProduct(lead, structuredProducts);
-  const pageIdentityMatches = hasProductIdentity(lead, pageText) || Boolean(matchingStructured);
-  if (!pageIdentityMatches) {
+  if (!textHasProductIdentity(lead, pageText)) {
     return verificationFailure(lead, "PAGE_IDENTITY_MISMATCH");
   }
-  if (matchingStructured && isUnavailableStructuredOffer(matchingStructured)) {
-    return verificationFailure(lead, "PAGE_UNAVAILABLE");
-  }
-  const visiblePrice = observedUsdPrice(pageText);
-  const structuredPrice = observedStructuredUsdPrice(lead, structuredProducts, pageIdentityMatches);
-  const priceObservation = visiblePrice === null
-    ? structuredPrice
-    : { price: visiblePrice, source: "visible" as const };
-  if (!priceObservation) {
-    return verificationFailure(lead, "PAGE_PRICE_NOT_OBSERVED");
-  }
-  const price = priceObservation.price;
+  const structuredProducts = evidence.structuredProducts ?? [];
+  const resolvedPrice = resolveProductPrice(
+    lead,
+    finalUrl,
+    structuredProducts,
+    criteria.currency ?? "USD",
+  );
+  if (typeof resolvedPrice === "string") return verificationFailure(lead, resolvedPrice);
+  const price = resolvedPrice.price;
   if (price < criteria.minimumPrice || price > criteria.maximumPrice) {
     return verificationFailure(lead, "PAGE_PRICE_OUT_OF_RANGE");
   }
@@ -441,13 +626,27 @@ export function assessDiscoveredProductPage(
       externalId: lead.externalId,
       // A matching Product JSON-LD name is product-page evidence and is more
       // specific than an untrusted search-citation title.
-      name: matchingStructured?.name ?? lead.title,
+      name: resolvedPrice.item.name ?? lead.title,
       // The browser obtains the full page only for deterministic validation.
       // Do not persist unrestricted page text or provider snippets as a
       // product description; the page title remains traceable provenance.
       description: evidence.title,
       category: null,
       price,
+      listPrice: resolvedPrice.listPrice,
+      priceKind: resolvedPrice.priceKind,
+      variant: resolvedPrice.selectedVariant,
+      priceObservation: {
+        method: sourceMethod(resolvedPrice.item.source),
+        supportingObservation: priceObservationText(
+          resolvedPrice.item.source,
+          resolvedPrice.selectedVariant,
+        ),
+        sourceUrl: finalUrl.toString(),
+        selectedVariant: resolvedPrice.selectedVariant,
+        priceKind: resolvedPrice.priceKind,
+        observedAt: verifiedAt,
+      },
       sourceUrl: finalUrl.toString(),
       evidenceConfidence: "high",
       evidenceStatus: "product_page_verified",
@@ -471,22 +670,34 @@ export function assessDiscoveredProductPage(
         ...verifiedProduct.evidence,
         {
           field: "product-page verification",
-          value: "Product page responded successfully with matching identity, niche, and observed price.",
+          value: "Individual product page responded successfully with matching identity, niche, selected variant, and observed price.",
           sourceUrl: finalUrl.toString(),
           observedAt: verifiedAt,
           confidence: "high",
         },
         {
           field: "product-page price source",
-          value: priceObservation.source === "json_ld"
-            ? "Observed in server-rendered Product JSON-LD."
-            : priceObservation.source === "meta"
-              ? "Observed in server-rendered product price metadata."
-              : "Observed in visible product-page text.",
+          value: priceObservationText(resolvedPrice.item.source, resolvedPrice.selectedVariant),
           sourceUrl: finalUrl.toString(),
           observedAt: verifiedAt,
           confidence: "high",
         },
+        {
+          field: "product-page price observation",
+          value: `${resolvedPrice.priceKind === "sale" ? "Sale" : resolvedPrice.priceKind === "regular" ? "Regular" : "Current"} price ${price.toFixed(2)} ${criteria.currency ?? "USD"}${resolvedPrice.listPrice !== null ? `; list price ${resolvedPrice.listPrice.toFixed(2)} ${criteria.currency ?? "USD"}` : ""}.`,
+          sourceUrl: finalUrl.toString(),
+          observedAt: verifiedAt,
+          confidence: "high",
+        },
+        ...(resolvedPrice.selectedVariant
+          ? [{
+              field: "product-page variant",
+              value: resolvedPrice.selectedVariant,
+              sourceUrl: finalUrl.toString(),
+              observedAt: verifiedAt,
+              confidence: "high" as const,
+            }]
+          : []),
         {
           field: "product-page niche verification",
           value: "Product page text contained every selected niche term.",
@@ -593,12 +804,14 @@ export async function verifyDiscoveredProductPages(
           rejected.push(verificationFailure(lead, "PAGE_REDIRECT_REJECTED"));
           continue;
         }
+        const pageEvidence = await collectProductPageEvidence(page);
         const assessed = assessDiscoveredProductPage(lead, {
           finalUrl: finalUrl.toString(),
           httpStatus: response?.status() ?? null,
           title: await page.title(),
           bodyText: (await page.locator("body").innerText()).slice(0, 40_000),
-          structuredProducts: await collectStructuredProductEvidence(page),
+          structuredProducts: pageEvidence.products,
+          pageTypes: pageEvidence.pageTypes,
         }, options);
         if (assessed.verifiedProduct) verifiedProducts.push(assessed.verifiedProduct);
         else rejected.push(assessed);

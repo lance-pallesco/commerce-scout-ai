@@ -2,6 +2,8 @@ import {
   ProductCandidateSchema,
   type EvidenceStatus,
   type ProductCandidate,
+  type PriceKind,
+  type PriceObservation,
 } from "./contracts";
 
 export type RawProductRecord = Readonly<{
@@ -10,6 +12,10 @@ export type RawProductRecord = Readonly<{
   description?: string | null;
   category?: string | null;
   price?: string | number | null;
+  listPrice?: string | number | null;
+  priceKind?: PriceKind;
+  variant?: string | null;
+  priceObservation?: PriceObservation | null;
   currency?: string | null;
   sourceUrl?: string | null;
   imageUrl?: string | null;
@@ -67,6 +73,7 @@ export function normalizeProduct(
   if (!name || !sourceUrl) return null;
 
   const price = parseObservedPrice(raw.price);
+  const listPrice = parseObservedPrice(raw.listPrice);
   const description = optionalText(raw.description);
   const category = optionalText(raw.category)?.toLowerCase() ?? null;
   const imageUrl = validUrl(raw.imageUrl);
@@ -90,6 +97,10 @@ export function normalizeProduct(
     category,
     price,
     currency: price === null ? null : "USD",
+    listPrice,
+    priceKind: raw.priceKind ?? "current",
+    variant: optionalText(raw.variant),
+    priceObservation: raw.priceObservation ?? null,
     sourceUrl,
     imageUrl,
     evidence: [

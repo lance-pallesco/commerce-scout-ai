@@ -1,6 +1,7 @@
 import { apiError, apiException } from "@/lib/api/response";
 import { getServerConfig } from "@/lib/config/env";
 import { getResearchJob, getResearchProducts } from "@/lib/jobs/repository";
+import { isRankableProductCandidate } from "@/lib/research/contracts";
 
 function csvCell(value: string | number | null): string {
   const content = value === null ? "" : String(value);
@@ -18,18 +19,24 @@ export async function GET(
     if (!job) return apiError("JOB_NOT_FOUND", "The requested research job was not found.", 404);
     const products = (await getResearchProducts(config, jobId)).filter(
       ({ product, evaluation }) =>
-        product.evidenceStatus !== "search_discovery" &&
-        evaluation?.evidenceScope !== "search_discovery",
+        isRankableProductCandidate(product) &&
+        evaluation?.evidenceScope !== "search_discovery" &&
+        evaluation?.evidenceScope !== "verification_required",
     );
-    const header = ["rank", "name", "source", "source_url", "price", "currency", "score", "evidence_quality", "evidence_scope", "missing_information"];
+    const header = ["rank", "name", "variant", "source", "source_url", "price", "list_price", "price_kind", "currency", "price_observation_method", "price_observed_at", "score", "evidence_quality", "evidence_scope", "missing_information"];
     const rows = products.map(({ product, evaluation }, index) =>
       [
         index + 1,
         product.name,
+        product.variant,
         product.sourceId,
         product.sourceUrl,
         product.price,
+        product.listPrice,
+        product.priceKind,
         product.currency,
+        product.priceObservation?.method ?? null,
+        product.priceObservation?.observedAt ?? null,
         evaluation?.score.total ?? null,
         evaluation?.evidenceQuality ?? null,
         evaluation?.evidenceScope ?? product.evidenceStatus,

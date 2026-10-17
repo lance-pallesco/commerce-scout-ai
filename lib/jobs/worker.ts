@@ -85,22 +85,53 @@ function verificationLimitation(summary: ProductPageVerificationSummary): string
   return `${summary.rejectedLeads.length} of ${summary.queuedLeadCount} dynamically discovered lead${summary.queuedLeadCount === 1 ? " was" : "s were"} not saved or ranked because bounded product-page verification did not pass (${reasonCounts}).`;
 }
 
+function postVerificationSummary(
+  candidates: readonly ProductCandidate[],
+  requestedProductCount: number,
+  summary: ProductPageVerificationSummary,
+  completion: AgentResearchReport["completion"],
+): string {
+  const target = `${candidates.length}/${requestedProductCount} requested candidate${requestedProductCount === 1 ? "" : "s"}`;
+  const outcome = completion === "completed" ? "was fulfilled" : "was partially fulfilled";
+  if (summary.queuedLeadCount === 0) {
+    return `Research execution completed. The verified candidate target ${target} ${outcome}.`;
+  }
+  return `Post-run product-page verification completed: ${summary.verifiedCandidateCount}/${summary.queuedLeadCount} discovered lead${summary.queuedLeadCount === 1 ? "" : "s"} passed. The verified candidate target ${target} ${outcome}.`;
+}
+
+function isStalePreVerificationLimitation(value: string): boolean {
+  return /(?:not yet (?:been )?verified|verification (?:has )?not (?:yet )?(?:been )?(?:done|available)|only search-result snippets|only snippets were observed|not independently check(?:ed)? prices|product pages were not independently verified)/i.test(value);
+}
+
+export function deriveVerifiedJobStatus(
+  candidates: readonly ProductCandidate[],
+  requestedProductCount: number,
+): Extract<FinalJobStatus, "completed" | "partial"> {
+  return candidates.length >= requestedProductCount ? "completed" : "partial";
+}
+
 export function reconcileVerifiedResearchReport(
   report: AgentResearchReport | undefined,
   candidates: readonly ProductCandidate[],
   summary: ProductPageVerificationSummary,
   completion: AgentResearchReport["completion"],
+  requestedProductCount: number,
 ): AgentResearchReport | undefined {
   if (!report) return undefined;
   const candidateIds = new Set(candidates.map((candidate) => candidate.id));
   const limitation = verificationLimitation(summary);
+  const targetLimitation = completion === "partial"
+    ? `Only ${candidates.length}/${requestedProductCount} requested candidate${requestedProductCount === 1 ? "" : "s"} passed final evidence verification.`
+    : null;
   return AgentResearchReportSchema.parse({
     ...report,
     completion,
+    executiveSummary: postVerificationSummary(candidates, requestedProductCount, summary, completion),
     findings: report.findings.filter((finding) => candidateIds.has(finding.productId)),
     limitations: [...new Set([
-      ...report.limitations,
+      ...report.limitations.filter((item) => !isStalePreVerificationLimitation(item)),
       ...(limitation ? [limitation] : []),
+      ...(targetLimitation ? [targetLimitation] : []),
     ])].slice(0, 15),
   });
 }
@@ -217,6 +248,7 @@ async function runClaudeResearch(
       niche: job.request.niche,
       minimumPrice: job.request.minimumPrice,
       maximumPrice: job.request.maximumPrice,
+      currency: job.request.currency,
       headless: config.browserHeadless,
       timeoutMs: config.browserTimeoutMs,
       maxPages: Math.min(config.browserMaxPagesPerRun, dynamicLeads.length),
@@ -233,16 +265,16 @@ async function runClaudeResearch(
   }
 
   const candidates = [...directlyVerifiedCandidates, ...verifiedDiscoveryCandidates];
-  const status: Extract<FinalJobStatus, "completed" | "partial"> =
-    agent.status === "completed" && candidates.length >= job.request.requestedProductCount
-      ? "completed"
-      : "partial";
+  // Claude's report is produced before restricted page verification. Final
+  // fulfilment must therefore be derived from persisted, verified candidates
+  // rather than the model's pre-verification completion label.
+  const status = deriveVerifiedJobStatus(candidates, job.request.requestedProductCount);
   const report = reconcileVerifiedResearchReport(agent.report, candidates, verification ?? {
     queuedLeadCount: 0,
     attemptedLeadCount: 0,
     verifiedCandidateCount: 0,
     rejectedLeads: [],
-  }, status);
+  }, status, job.request.requestedProductCount);
   await updateJobProgress(config, jobId, { currentStage: "scoring", progressPercent: 75 });
   const evaluations = evaluateProducts(candidates, job.request, report);
   try {

@@ -115,6 +115,37 @@ describe("research job API", () => {
     expect(csv.trim().split("\n")).toHaveLength(1);
   });
 
+  it("does not export a historical product-page record without trusted price provenance", async () => {
+    configureFixtureEnvironment();
+    const config = getServerConfig();
+    const request = ResearchRequestSchema.parse({ ...submission, mode: "fixtures" });
+    const job = await createResearchJob(request, config);
+    const [fixtureProduct] = collectFixtureProducts({ niche: "skincare", limit: 1 }).products;
+    const legacyProduct = {
+      ...fixtureProduct,
+      id: "anthropic-web-discovery:legacy-page-price",
+      sourceId: "anthropic-web-discovery",
+      externalId: "legacy-page-price",
+      name: "Legacy page price without provenance",
+      sourceUrl: "https://shop.example/products/legacy-page-price",
+      evidenceStatus: "product_page_verified" as const,
+      priceObservation: null,
+    };
+    await persistResearchBundle(config, job.id, [legacyProduct], [], {
+      mode: "claude_agent",
+      limitations: ["Historical price-provenance regression coverage."],
+    });
+
+    const response = await getExport(
+      new Request("http://localhost"),
+      { params: Promise.resolve({ jobId: job.id }) } as never,
+    );
+    const csv = await response.text();
+
+    expect(csv).not.toContain("Legacy page price without provenance");
+    expect(csv.trim().split("\n")).toHaveLength(1);
+  });
+
   it("returns consistent client errors for invalid and unknown resources", async () => {
     configureFixtureEnvironment();
     const invalid = await createJob(

@@ -9,6 +9,7 @@ import {
 import type { AgentResearchReport } from "@/lib/agent/contracts";
 import {
   ProductCandidateSchema,
+  requiresProductPageReverification,
   type ProductCandidate,
   type ProductPageVerificationSummary,
   type ResearchRequest,
@@ -536,7 +537,7 @@ export async function getResearchProducts(
       // Historical dynamic discoveries predate product-page verification. Keep
       // them visible as archival leads, but never reclassify them as ranked
       // source evidence merely because the new status field is absent.
-      const product = ProductCandidateSchema.parse({
+      const parsedProduct = ProductCandidateSchema.parse({
         ...rawProduct,
         evidenceStatus:
           rawProduct.evidenceStatus ??
@@ -544,12 +545,21 @@ export async function getResearchProducts(
             ? "search_discovery"
             : "source_verified"),
       });
+      // Product-page verification before structured price provenance was
+      // introduced could have selected an unrelated body-text amount. Keep the
+      // historical record intact in SQLite, but explicitly remove it from
+      // trusted rankings and exports until it is safely revalidated.
+      const product = requiresProductPageReverification(parsedProduct)
+        ? ProductCandidateSchema.parse({ ...parsedProduct, evidenceStatus: "verification_required" })
+        : parsedProduct;
       const rawEvaluation = row.evaluation_json
         ? JSON.parse(asString(row.evaluation_json))
         : null;
       return {
         product,
-        evaluation: rawEvaluation
+        evaluation: product.evidenceStatus === "verification_required"
+          ? null
+          : rawEvaluation
           ? ProductEvaluationSchema.parse({
               ...rawEvaluation,
               evidenceScope:

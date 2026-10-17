@@ -17,7 +17,11 @@ import {
   persistResearchResults,
   requestResearchJobCancellation,
 } from "@/lib/jobs/repository";
-import { reconcileVerifiedResearchReport, runResearchWorkerOnce } from "@/lib/jobs/worker";
+import {
+  deriveVerifiedJobStatus,
+  reconcileVerifiedResearchReport,
+  runResearchWorkerOnce,
+} from "@/lib/jobs/worker";
 import { ResearchRequestSchema } from "@/lib/research/contracts";
 import { collectFixtureProducts } from "@/lib/research/fixture-source";
 import { evaluateProducts } from "@/lib/scoring/score-product";
@@ -125,6 +129,34 @@ describe("SQLite research jobs", () => {
     expect(persisted.every((entry) => entry.evaluation?.productId === entry.product.id)).toBe(true);
   });
 
+  it("excludes historical product-page records without price provenance from rankings", async () => {
+    const config = testConfig();
+    const job = await createResearchJob(testRequest(), config);
+    const [fixtureProduct] = collectFixtureProducts({ niche: "skincare", limit: 1 }).products;
+    const legacyProduct = {
+      ...fixtureProduct,
+      id: "anthropic-web-discovery:legacy-product-page",
+      sourceId: "anthropic-web-discovery",
+      externalId: "legacy-product-page",
+      evidenceStatus: "product_page_verified" as const,
+      priceObservation: null,
+    };
+
+    await persistResearchResults(
+      config,
+      job.id,
+      [legacyProduct],
+      evaluateProducts([legacyProduct], testRequest()),
+    );
+
+    await expect(getResearchProducts(config, job.id)).resolves.toEqual([
+      expect.objectContaining({
+        product: expect.objectContaining({ evidenceStatus: "verification_required" }),
+        evaluation: null,
+      }),
+    ]);
+  });
+
   it("rolls back product persistence when a later product iteration fails", async () => {
     const config = testConfig();
     const job = await createResearchJob(testRequest(), config);
@@ -160,8 +192,8 @@ describe("SQLite research jobs", () => {
   it("removes failed discovery leads from the report before persistence and ranking", () => {
     const report = AgentResearchReportSchema.parse({
       completion: "completed",
-      executiveSummary: "One search citation was returned.",
-      limitations: [],
+      executiveSummary: "Product pages were not independently verified.",
+      limitations: ["Product-page verification has not yet been done."],
       findings: [{
         productId: "anthropic-web-discovery:missing-page",
         summary: "A result snippet named a product.",
@@ -182,9 +214,18 @@ describe("SQLite research jobs", () => {
         sourceUrl: "https://shop.example/products/missing-page",
         reason: "PAGE_UNAVAILABLE",
       }],
-    }, "partial");
+    }, "partial", 5);
 
     expect(reconciled).toMatchObject({ completion: "partial", findings: [] });
     expect(reconciled?.limitations.join(" ")).toContain("not saved or ranked");
+    expect(reconciled?.limitations.join(" ")).not.toMatch(/not yet|not independently/i);
+    expect(reconciled?.executiveSummary).toContain("0/5 requested candidates");
+  });
+
+  it("derives final completion from verified candidates instead of Claude's pre-verification label", () => {
+    const candidates = collectFixtureProducts({ niche: "skincare", limit: 2 }).products;
+
+    expect(deriveVerifiedJobStatus(candidates, 2)).toBe("completed");
+    expect(deriveVerifiedJobStatus(candidates, 3)).toBe("partial");
   });
 });

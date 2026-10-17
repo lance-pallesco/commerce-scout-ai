@@ -31,6 +31,34 @@ function discoveryLead(): DiscoveryLead {
   };
 }
 
+function productEvidence(
+  input: Readonly<{
+    name?: string;
+    price: string;
+    sku?: string;
+    availability?: string;
+    listPrice?: string;
+  }>,
+) {
+  return extractStructuredProductEvidence([
+    JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "Product",
+      name: input.name ?? "Verified Glow Serum",
+      ...(input.sku ? { sku: input.sku } : {}),
+      offers: {
+        "@type": "Offer",
+        price: input.price,
+        priceCurrency: "USD",
+        ...(input.availability ? { availability: input.availability } : {}),
+        ...(input.listPrice
+          ? { priceSpecification: { price: input.listPrice, priceType: "ListPrice" } }
+          : {}),
+      },
+    }),
+  ]);
+}
+
 afterEach(async () => {
   await browser?.close();
   browser = undefined;
@@ -188,6 +216,7 @@ describe("webscraper product extraction", () => {
       httpStatus: 200,
       title: "Verified Glow Serum skincare",
       bodyText: "Verified Glow Serum skincare is available now for $29.00.",
+      structuredProducts: productEvidence({ price: "29.00" }),
       verifiedAt: "2026-10-17T00:00:00.000Z",
     }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
     const redirected = assessDiscoveredProductPage(lead, {
@@ -206,7 +235,7 @@ describe("webscraper product extraction", () => {
     expect(redirected.verifiedProduct).toBeUndefined();
   });
 
-  it("uses a page-observed price when a discovery citation had no price", () => {
+  it("does not promote an unscoped body-text price even when a discovery citation had no price", () => {
     const lead = discoveryLead();
 
     const verification = assessDiscoveredProductPage(lead, {
@@ -218,12 +247,8 @@ describe("webscraper product extraction", () => {
     }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
 
     expect(lead.observedPrice).toBeNull();
-    expect(verification).toMatchObject({ code: "VERIFIED" });
-    expect(verification.verifiedProduct).toMatchObject({
-      price: 31.5,
-      currency: "USD",
-      evidenceStatus: "product_page_verified",
-    });
+    expect(verification).toMatchObject({ code: "PAGE_IDENTITY_MISMATCH" });
+    expect(verification.verifiedProduct).toBeUndefined();
   });
 
   it("promotes a matching direct product page when its price is only in server-rendered JSON-LD", () => {
@@ -260,7 +285,7 @@ describe("webscraper product extraction", () => {
     expect(verification.verifiedProduct?.evidence).toEqual(expect.arrayContaining([
       expect.objectContaining({
         field: "product-page price source",
-        value: "Observed in server-rendered Product JSON-LD.",
+        value: "matched primary Product JSON-LD offer.",
       }),
     ]));
   });
@@ -270,6 +295,7 @@ describe("webscraper product extraction", () => {
     const structuredProducts = extractStructuredProductEvidence([], {
       price: "31.50",
       currency: "USD",
+      name: "Verified Glow Serum",
     });
 
     const verified = assessDiscoveredProductPage(lead, {
@@ -291,7 +317,7 @@ describe("webscraper product extraction", () => {
     expect(verified.verifiedProduct?.evidence).toEqual(expect.arrayContaining([
       expect.objectContaining({
         field: "product-page price source",
-        value: "Observed in server-rendered product price metadata.",
+        value: "matched primary product metadata.",
       }),
     ]));
     expect(rejected).toMatchObject({ code: "PAGE_IDENTITY_MISMATCH" });
@@ -331,9 +357,130 @@ describe("webscraper product extraction", () => {
       httpStatus: 200,
       title: "Verified Glow Serum skincare",
       bodyText: "Verified Glow Serum skincare is $125.00 on this product page.",
+      structuredProducts: productEvidence({ price: "125.00" }),
     }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
 
     expect(verification).toMatchObject({ code: "PAGE_PRICE_OUT_OF_RANGE" });
     expect(verification.verifiedProduct).toBeUndefined();
+  });
+
+  it("uses the Ulta primary Product price instead of an unrelated recommended-product price", () => {
+    const lead: DiscoveryLead = {
+      ...discoveryLead(),
+      id: "anthropic-web-discovery:nova-sonic",
+      externalId: "nova-sonic",
+      title: "NOVA Sonic Facial Cleansing Brush",
+      sourceUrl: "https://www.ulta.com/p/nova-sonic-facial-cleansing-brush-mkt77008601?sku=77013312",
+    };
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "NOVA Sonic Facial Cleansing Brush | Ulta Beauty",
+      bodyText: "NOVA Sonic Facial Cleansing Brush. Recommended facial brush $15.00.",
+      structuredProducts: productEvidence({
+        name: "NOVA Sonic Facial Cleansing Brush",
+        sku: "77013312",
+        price: "39.99",
+      }),
+    }, { niche: "facial", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(verification.verifiedProduct).toMatchObject({
+      price: 39.99,
+      variant: "SKU 77013312",
+      priceKind: "current",
+      priceObservation: expect.objectContaining({ method: "product_json_ld" }),
+    });
+    expect(verification.verifiedProduct?.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "product-page price observation",
+        value: "Current price 39.99 USD.",
+      }),
+    ]));
+  });
+
+  it("rejects the Fitfacebeauty collection instead of assigning its shipping threshold to a product", () => {
+    const lead: DiscoveryLead = {
+      ...discoveryLead(),
+      title: "Microcurrent Devices Fitfacebeauty",
+      sourceUrl: "https://www.fitfacebeauty.com/collections/microcurrent-devices",
+    };
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Microcurrent Devices | Fitfacebeauty",
+      bodyText: "Free shipping over $50.00. Explore multiple microcurrent devices.",
+      structuredProducts: productEvidence({ name: "Different Microcurrent Device", price: "50.00" }),
+      pageTypes: ["CollectionPage", "ItemList"],
+    }, { niche: "facial", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(verification).toMatchObject({ code: "PAGE_NOT_PRODUCT_DETAIL" });
+    expect(verification.verifiedProduct).toBeUndefined();
+  });
+
+  it("rejects a multi-product ItemList graph even when its URL does not reveal the listing", () => {
+    const lead = discoveryLead();
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: "https://shop.example/featured",
+      httpStatus: 200,
+      title: "Featured skincare",
+      bodyText: "Featured skincare products.",
+      structuredProducts: [
+        ...productEvidence({ name: "Verified Glow Serum", price: "29.00" }),
+        ...productEvidence({ name: "Another Glow Serum", price: "35.00" }),
+      ],
+      pageTypes: ["ItemList"],
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(verification).toMatchObject({ code: "PAGE_NOT_PRODUCT_DETAIL" });
+    expect(verification.verifiedProduct).toBeUndefined();
+  });
+
+  it("uses the selected variant, preserves sale versus list price, and rejects an unmatched variant", () => {
+    const lead: DiscoveryLead = {
+      ...discoveryLead(),
+      sourceUrl: "https://shop.example/products/verified-glow-serum?variant=blue-small",
+    };
+    const evidence = [
+      ...productEvidence({ price: "29.00", listPrice: "39.00" }).map((item) => ({ ...item, sku: "blue-small" })),
+      ...productEvidence({ price: "35.00" }).map((item) => ({ ...item, sku: "rose-large" })),
+    ];
+    const selected = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum skincare product.",
+      structuredProducts: evidence,
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+    const unmatched = assessDiscoveredProductPage({ ...lead, sourceUrl: "https://shop.example/products/verified-glow-serum?variant=unknown" }, {
+      finalUrl: "https://shop.example/products/verified-glow-serum?variant=unknown",
+      httpStatus: 200,
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum skincare product.",
+      structuredProducts: evidence,
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(selected.verifiedProduct).toMatchObject({
+      price: 29,
+      listPrice: 39,
+      priceKind: "sale",
+      variant: "VARIANT blue-small",
+    });
+    expect(unmatched).toMatchObject({ code: "PAGE_VARIANT_UNRESOLVED" });
+  });
+
+  it("rejects conflicting primary structured prices rather than guessing", () => {
+    const lead = discoveryLead();
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum skincare product. A related product is $15.00.",
+      structuredProducts: [
+        ...productEvidence({ price: "29.00" }),
+        ...productEvidence({ price: "39.00" }),
+      ],
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(verification).toMatchObject({ code: "PAGE_PRICE_AMBIGUOUS" });
   });
 });

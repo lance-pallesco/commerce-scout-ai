@@ -16,7 +16,7 @@ export const ProductEvaluationSchema = z.object({
   productId: z.string().min(1),
   score: ScoreBreakdownSchema,
   evidenceQuality: z.enum(["high", "medium", "low"]),
-  evidenceScope: z.enum(["source_verified", "product_page_verified", "search_discovery"]).default("source_verified"),
+  evidenceScope: z.enum(["source_verified", "product_page_verified", "search_discovery", "verification_required"]).default("source_verified"),
   observedStrengths: z.array(z.string().min(1)).max(10),
   concerns: z.array(z.string().min(1)).max(15),
   missingInformation: z.array(z.string().min(1)).max(20),
@@ -71,6 +71,7 @@ export function scoreProduct(
   const observedStrengths: string[] = [];
   const concerns: string[] = [];
   const searchDiscoveryOnly = product.evidenceStatus === "search_discovery";
+  const verificationRequired = product.evidenceStatus === "verification_required";
   const priceFit =
     product.price !== null &&
     product.price >= request.minimumPrice &&
@@ -85,13 +86,15 @@ export function scoreProduct(
 
   const evidenceCount = countAvailableEvidence(product);
   const rawEvidenceQuality = Math.round((evidenceCount / 5) * 30);
-  const evidenceQuality = searchDiscoveryOnly
+  const evidenceQuality = searchDiscoveryOnly || verificationRequired
     ? Math.min(rawEvidenceQuality, 12)
     : rawEvidenceQuality;
-  if (!searchDiscoveryOnly && evidenceCount >= 4) {
+  if (!searchDiscoveryOnly && !verificationRequired && evidenceCount >= 4) {
     observedStrengths.push("Most core catalog fields are available as source evidence.");
   } else if (searchDiscoveryOnly) {
     concerns.push(SEARCH_DISCOVERY_VERIFICATION_GAP);
+  } else if (verificationRequired) {
+    concerns.push("Historical product-page price evidence requires revalidation before it can be ranked.");
   } else {
     concerns.push("Core catalog evidence is incomplete.");
   }
@@ -104,19 +107,20 @@ export function scoreProduct(
   }
 
   const rawInformationCompleteness = Math.round((evidenceCount / 5) * 25);
-  const informationCompleteness = searchDiscoveryOnly
+  const informationCompleteness = searchDiscoveryOnly || verificationRequired
     ? Math.min(rawInformationCompleteness, 8)
     : rawInformationCompleteness;
   const missingInformation = [
     ...product.missingFields,
     ...(searchDiscoveryOnly ? ["product-page verification"] : []),
+    ...(verificationRequired ? ["verified price provenance"] : []),
   ];
   if (product.missingFields.length > 0) {
     concerns.push(`Missing source fields: ${product.missingFields.join(", ")}.`);
   }
   const total = priceFit + evidenceQuality + nicheRelevance + informationCompleteness;
   const evidenceLevel =
-    searchDiscoveryOnly ? "low" : evidenceCount === 5 ? "high" : evidenceCount >= 3 ? "medium" : "low";
+    searchDiscoveryOnly || verificationRequired ? "low" : evidenceCount === 5 ? "high" : evidenceCount >= 3 ? "medium" : "low";
 
   return ProductEvaluationSchema.parse({
     productId: product.id,
@@ -124,6 +128,8 @@ export function scoreProduct(
     evidenceQuality: evidenceLevel,
     evidenceScope: searchDiscoveryOnly
       ? "search_discovery"
+      : verificationRequired
+        ? "verification_required"
       : product.evidenceStatus === "product_page_verified"
         ? "product_page_verified"
         : "source_verified",
