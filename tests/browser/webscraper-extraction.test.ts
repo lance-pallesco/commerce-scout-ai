@@ -3,16 +3,33 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   BrowserCollectionError,
+  assessDiscoveredProductPage,
   buildCollectionUrl,
   collectWebScraperCatalogProducts,
   createDefaultBrowserLauncher,
   extractStructuredSearchProducts,
   extractWebScraperCatalogProducts,
 } from "@/lib/research/browser-source";
+import type { ProductCandidate } from "@/lib/research/contracts";
+import { collectFixtureProducts } from "@/lib/research/fixture-source";
 import { getResearchSource } from "@/lib/research/source-registry";
 
 const source = getResearchSource("webscraper-ecommerce-demo", "live");
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+
+function discoveryLead(): ProductCandidate {
+  const fixture = collectFixtureProducts({ niche: "skincare", limit: 1 }).products[0];
+  return {
+    ...fixture,
+    id: "anthropic-web-discovery:verified-glow-serum",
+    sourceId: "anthropic-web-discovery",
+    externalId: "verified-glow-serum",
+    name: "Verified Glow Serum",
+    price: 29,
+    sourceUrl: "https://shop.example/products/verified-glow-serum",
+    evidenceStatus: "search_discovery",
+  };
+}
 
 afterEach(async () => {
   await browser?.close();
@@ -148,5 +165,43 @@ describe("webscraper product extraction", () => {
       }),
     ).rejects.toMatchObject({ code: "COLLECTION_CANCELLED" });
     expect(launchBrowser).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing discovered page instead of producing a verified candidate", () => {
+    const lead = discoveryLead();
+
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 404,
+      title: "Page not found",
+      bodyText: "The requested product is no longer available.",
+    });
+
+    expect(verification).toMatchObject({ code: "PAGE_UNAVAILABLE" });
+    expect(verification.verifiedProduct).toBeUndefined();
+  });
+
+  it("requires same-host identity and observed-price evidence before promoting a discovery lead", () => {
+    const lead = discoveryLead();
+    const verified = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Verified Glow Serum",
+      bodyText: "Verified Glow Serum is available now for $29.00.",
+      verifiedAt: "2026-10-17T00:00:00.000Z",
+    });
+    const redirected = assessDiscoveredProductPage(lead, {
+      finalUrl: "https://untrusted.example/products/verified-glow-serum",
+      httpStatus: 200,
+      title: "Verified Glow Serum",
+      bodyText: "Verified Glow Serum is available now for $29.00.",
+    });
+
+    expect(verified.verifiedProduct).toMatchObject({
+      evidenceStatus: "product_page_verified",
+      sourceUrl: lead.sourceUrl,
+    });
+    expect(redirected).toMatchObject({ code: "PAGE_REDIRECT_REJECTED" });
+    expect(redirected.verifiedProduct).toBeUndefined();
   });
 });

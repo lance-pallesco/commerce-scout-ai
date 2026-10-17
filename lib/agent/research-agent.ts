@@ -13,6 +13,10 @@ import {
 } from "@/lib/config/env";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
 import { isSearchDiscoverySource } from "@/lib/research/source-registry";
+import {
+  discoverySearchResultLimit,
+  estimatedWebSearchCostPerUse,
+} from "@/lib/research/web-discovery";
 
 import {
   AgentResearchReportSchema,
@@ -31,7 +35,7 @@ export const RESEARCH_AGENT_SYSTEM_PROMPT = `You are CommerceScout AI's product 
 
 You may use only the provided CommerceScout MCP research tools. You do not have permission to browse arbitrary URLs, execute shell commands, access files, alter data, or use tools outside this server. Use discover_products first for a free-form live niche when the dynamic discovery source is approved; the backend performs the configured provider's bounded Web Search request and validates all returned URLs.
 
-Workflow: first read the research criteria and source list, then choose the dynamic discovery tool for a niche that is not tied to a fixed catalog. Formulate a concise objective-derived search phrase, call discover_products, and use the returned observed evidence. You may use a registered searchable adapter as a bounded fallback, then inspect candidates as needed and produce the requested structured report. Stop collecting when the requested product count has enough available evidence. If no approved source returns matching products, return a partial report and state the limitation; never substitute an unrelated category.
+Workflow: first read the research criteria and source list, then choose the dynamic discovery tool for a free-form live niche. Formulate one concise objective-derived search phrase, call discover_products, and use the returned observed evidence. Automatic live requests include only the dynamic discovery source; do not call a retailer adapter unless its source ID is explicitly present in this job. Stop collecting when the requested product count has enough available evidence. If no approved source returns matching products, return a partial report and state the limitation; never substitute an unrelated category.
 
 If discover_products reports that it consumed the remaining Web Search allowance, do not call it again. Inspect the available candidates and complete a truthful partial report instead.
 
@@ -78,6 +82,8 @@ export type AgentRunResult = Readonly<{
   report?: AgentResearchReport;
   candidates: ProductCandidate[];
   estimatedCostUsd: number;
+  modelEstimatedCostUsd: number;
+  webSearchEstimatedCostUsd: number;
   elapsedTimeMs: number;
   turns: number;
   errorCode?: string;
@@ -222,6 +228,29 @@ function userPrompt(request: ResearchRequest): string {
   ].join("\n");
 }
 
+function reservedWebSearchBudgetUsd(request: ResearchRequest, config: ServerConfig): number {
+  if (!request.sourceIds.some(isSearchDiscoverySource)) return 0;
+  const maximumResults = discoverySearchResultLimit(
+    request.requestedProductCount,
+    config.webSearchMaxResults,
+  );
+  return Number((
+    config.webSearchMaxUses * estimatedWebSearchCostPerUse(config, maximumResults)
+  ).toFixed(6));
+}
+
+function sdkBudgetUsd(request: ResearchRequest, config: ServerConfig): number {
+  const reserved = reservedWebSearchBudgetUsd(request, config);
+  const remaining = Number((config.agentMaxBudgetUsd - reserved).toFixed(6));
+  if (remaining <= 0) {
+    throw new AgentExecutionError(
+      "AGENT_MAX_BUDGET",
+      "Research cannot start because the configured budget does not cover the reserved bounded Web Search cost.",
+    );
+  }
+  return remaining;
+}
+
 function classifyResult(
   result: SDKResultMessage,
   config: ServerConfig,
@@ -305,7 +334,7 @@ function terminalResultDetails(
   const details = [
     `${result.subtype}${result.is_error ? " (error)" : ""}`,
     `structured output ${"structured_output" in result && result.structured_output !== undefined ? "received" : "missing"}`,
-    `${result.num_turns} turns`,
+    `${result.num_turns} model round trips reported`,
   ];
   if (result.subtype === "success" && result.terminal_reason) {
     details.push(`terminal reason ${result.terminal_reason}`);
@@ -340,14 +369,11 @@ function applyEvidenceCompletionBoundary(
   report: AgentResearchReport,
   candidates: readonly ProductCandidate[],
 ): AgentResearchReport {
-  const hasOnlySearchDiscoveries =
-    candidates.length > 0 && candidates.every((candidate) => isSearchDiscoverySource(candidate.sourceId));
   const hasSearchDiscovery = candidates.some((candidate) => isSearchDiscoverySource(candidate.sourceId));
   if (!hasSearchDiscovery) return report;
 
   return AgentResearchReportSchema.parse({
     ...report,
-    completion: hasOnlySearchDiscoveries ? "partial" : report.completion,
     limitations: [...new Set([...report.limitations, SEARCH_DISCOVERY_LIMITATION])].slice(0, 15),
   });
 }
@@ -372,6 +398,8 @@ function toFailure(
     status,
     candidates,
     estimatedCostUsd: (result?.total_cost_usd ?? 0) + additionalCostUsd,
+    modelEstimatedCostUsd: result?.total_cost_usd ?? 0,
+    webSearchEstimatedCostUsd: additionalCostUsd,
     elapsedTimeMs: Date.now() - startedAt,
     turns: result?.num_turns ?? 0,
     errorCode: agentError.code,
@@ -440,6 +468,7 @@ export async function runResearchAgent(
       },
     });
     const executor = options.queryExecutor ?? query;
+    const maximumSdkBudgetUsd = sdkBudgetUsd(options.request, options.config);
     const messages = executor({
       prompt: userPrompt(options.request),
       options: {
@@ -447,7 +476,7 @@ export async function runResearchAgent(
         env: createAgentSdkEnvironment(options.config),
         model: routedAgentModel(options.config),
         maxTurns: options.config.agentMaxTurns,
-        maxBudgetUsd: options.config.agentMaxBudgetUsd,
+        maxBudgetUsd: maximumSdkBudgetUsd,
         systemPrompt: RESEARCH_AGENT_SYSTEM_PROMPT,
         tools: [],
         allowedTools: RESEARCH_ALLOWED_TOOLS,
@@ -547,6 +576,8 @@ export async function runResearchAgent(
       report,
       candidates: collectedCandidates,
       estimatedCostUsd: finalResult.total_cost_usd + (mcp.getAdditionalCostUsd?.() ?? 0),
+      modelEstimatedCostUsd: finalResult.total_cost_usd,
+      webSearchEstimatedCostUsd: mcp.getAdditionalCostUsd?.() ?? 0,
       elapsedTimeMs: Date.now() - startedAt,
       turns: finalResult.num_turns,
     };

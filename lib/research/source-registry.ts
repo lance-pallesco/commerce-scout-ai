@@ -165,13 +165,20 @@ export function resolveResearchSourceIds(input: {
 }): string[] {
   const compatible = listCompatibleResearchSources(input.niche, input.mode);
   if (input.selection === "automatic") {
-    if (compatible.length === 0) {
+    // Generic live research is Claude-first: Web Search discovers sources and
+    // the backend verifies only those observed product pages. Registered
+    // browser adapters remain available for explicit/manual regression work;
+    // they are never silently added as fallbacks for an arbitrary niche.
+    const automatic = input.mode === "live"
+      ? compatible.filter((source) => source.type === "web-search" && source.searchable)
+      : compatible;
+    if (automatic.length === 0) {
       throw new SourceRegistryError(
         "NO_COMPATIBLE_SOURCE",
         `No approved ${input.mode} research source supports the ${input.niche} niche.`,
       );
     }
-    return compatible.map((source) => source.id);
+    return automatic.map((source) => source.id);
   }
 
   if (!input.sourceIds || input.sourceIds.length !== 1) {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { getServerConfig } from "@/lib/config/env";
+import { AgentResearchReportSchema } from "@/lib/agent/contracts";
 import {
   appendJobEvent,
   claimNextResearchJob,
@@ -16,7 +17,7 @@ import {
   persistResearchResults,
   requestResearchJobCancellation,
 } from "@/lib/jobs/repository";
-import { runResearchWorkerOnce } from "@/lib/jobs/worker";
+import { reconcileVerifiedResearchReport, runResearchWorkerOnce } from "@/lib/jobs/worker";
 import { ResearchRequestSchema } from "@/lib/research/contracts";
 import { collectFixtureProducts } from "@/lib/research/fixture-source";
 import { evaluateProducts } from "@/lib/scoring/score-product";
@@ -154,5 +155,35 @@ describe("SQLite research jobs", () => {
     });
 
     expect((await getResearchJob(config, job.id))?.estimatedCostUsd).toBe(0.0226);
+  });
+
+  it("removes failed discovery leads from the report before persistence and ranking", () => {
+    const report = AgentResearchReportSchema.parse({
+      completion: "completed",
+      executiveSummary: "One search citation was returned.",
+      limitations: [],
+      findings: [{
+        productId: "anthropic-web-discovery:missing-page",
+        summary: "A result snippet named a product.",
+        customerAppeal: "Unverified.",
+        differentiationConsiderations: [],
+        risks: ["The page could be unavailable."],
+        missingInformation: ["Product-page verification"],
+        confidence: "low",
+      }],
+    });
+
+    const reconciled = reconcileVerifiedResearchReport(report, [], {
+      attemptedLeadCount: 1,
+      verifiedCandidateCount: 0,
+      rejectedLeads: [{
+        name: "Missing page product",
+        sourceUrl: "https://shop.example/products/missing-page",
+        reason: "PAGE_UNAVAILABLE",
+      }],
+    }, "partial");
+
+    expect(reconciled).toMatchObject({ completion: "partial", findings: [] });
+    expect(reconciled?.limitations.join(" ")).toContain("not saved or ranked");
   });
 });

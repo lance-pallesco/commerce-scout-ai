@@ -49,7 +49,7 @@ test("explains a persisted zero-result partial run without showing a ranking", a
   await page.getByRole("button", { name: /skincare.*Claude-selected approved source/i }).first().click();
 
   await expect(page.getByText("No product evidence was retained for this request")).toBeVisible();
-  await expect(page.getByText("No ranking or opportunity score was created.")).toBeVisible();
+  await expect(page.getByText("No recommendation or opportunity score was created.")).toBeVisible();
   await expect(page.getByText("Product ranking")).not.toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("zero-result-dashboard.png"), fullPage: true });
 });

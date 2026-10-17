@@ -14,6 +14,7 @@ export const ResearchJobStageSchema = z.enum([
   "queued",
   "collecting",
   "analyzing",
+  "verifying",
   "scoring",
   "finalizing",
   "failed",

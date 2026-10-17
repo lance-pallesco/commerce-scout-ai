@@ -614,6 +614,53 @@ describe("research MCP tools", () => {
     expect((capturedOptions?.env as Record<string, string | undefined>).OPENROUTER_API_KEY).toBeUndefined();
   });
 
+  it("reserves the bounded nested Web Search allowance before assigning the SDK budget", async () => {
+    let capturedOptions: Record<string, unknown> | undefined;
+    const dynamicRequest = ResearchRequestSchema.parse({
+      niche: "furniture",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find furniture candidates with observed product evidence.",
+    });
+
+    await runResearchAgent({
+      request: dynamicRequest,
+      config: getServerConfig({
+        RESEARCH_MODE: "live",
+        ANTHROPIC_API_KEY: "test-key",
+        AGENT_MAX_BUDGET_USD: "0.05",
+        WEB_SEARCH_MAX_USES: "2",
+        WEB_SEARCH_MAX_RESULTS: "10",
+      }),
+      queryExecutor: async function* ({ options }) {
+        capturedOptions = options as unknown as Record<string, unknown>;
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          structured_output: {
+            completion: "partial",
+            executiveSummary: "No candidate was returned by the mocked provider.",
+            limitations: ["No candidates."],
+            findings: [],
+          },
+        } as unknown as SDKMessage;
+      },
+      mcpServerFactory: () => ({
+        server: {} as ReturnType<typeof createResearchMcpServer>["server"],
+        getCandidates: () => [],
+      }),
+    });
+
+    // Two Anthropic Web Search calls reserve 2 × $0.010 before the SDK run.
+    expect(capturedOptions?.maxBudgetUsd).toBe(0.03);
+  });
+
   it("reports agent turn exhaustion accurately", async () => {
     const result = await runResearchAgent({
       request,
@@ -660,7 +707,7 @@ describe("research MCP tools", () => {
     expect(result).toMatchObject({ status: "partial", candidates: [] });
   });
 
-  it("downgrades a search-result-only report to partial and records its verification limit", async () => {
+  it("retains the agent report's verification limitation until the worker verifies its search leads", async () => {
     const fixtureProduct = collectFixtureProducts({ niche: "skincare", limit: 1 }).products[0];
     const candidates: ProductCandidate[] = [{
       ...fixtureProduct,
@@ -711,7 +758,7 @@ describe("research MCP tools", () => {
       }),
     });
 
-    expect(result).toMatchObject({ status: "partial", report: { completion: "partial" } });
+    expect(result).toMatchObject({ status: "completed", report: { completion: "completed" } });
     expect(result.report?.limitations.join(" ")).toContain("not independently verified");
   });
 
@@ -792,7 +839,7 @@ describe("research MCP tools", () => {
     });
     expect(events).toContainEqual(expect.objectContaining({
       type: "agent_terminal_result",
-      detail: "success (error); structured output missing; 1 turns; terminal reason api_error; Anthropic HTTP 529; SDK category invalid_request; request ID req_01SanitizedDiagnostic; provider message unavailable; 0.0000 USD estimated",
+      detail: "success (error); structured output missing; 1 model round trips reported; terminal reason api_error; Anthropic HTTP 529; SDK category invalid_request; request ID req_01SanitizedDiagnostic; provider message unavailable; 0.0000 USD estimated",
     }));
     expect(events).toContainEqual(expect.objectContaining({
       type: "agent_api_response_observed",

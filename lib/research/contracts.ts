@@ -4,6 +4,11 @@ export const CurrencySchema = z.enum(["USD"]);
 export const ResearchModeSchema = z.enum(["fixtures", "live"]);
 export const SourceSelectionSchema = z.enum(["automatic", "manual"]);
 export const SourceTypeSchema = z.enum(["fixture", "browser", "web-search"]);
+export const EvidenceStatusSchema = z.enum([
+  "source_verified",
+  "search_discovery",
+  "product_page_verified",
+]);
 export const BrowserCollectionStrategySchema = z.enum([
   "webscraper-catalog",
   "structured-search",
@@ -34,10 +39,24 @@ export const ProductCandidateSchema = z.object({
   imageUrl: z.string().url().max(2_000).nullable(),
   evidence: z.array(EvidenceSchema).max(40),
   missingFields: z.array(z.string().min(1).max(80)).max(20),
+  evidenceStatus: EvidenceStatusSchema.default("source_verified"),
   collectedAt: z.string().datetime(),
 });
 
 export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
+export type EvidenceStatus = z.infer<typeof EvidenceStatusSchema>;
+
+export const ProductPageVerificationSummarySchema = z.object({
+  attemptedLeadCount: z.number().int().nonnegative(),
+  verifiedCandidateCount: z.number().int().nonnegative(),
+  rejectedLeads: z.array(z.object({
+    name: z.string().min(1).max(240),
+    sourceUrl: z.string().url().max(2_000),
+    reason: z.string().min(1).max(80),
+  })).max(50),
+});
+
+export type ProductPageVerificationSummary = z.infer<typeof ProductPageVerificationSummarySchema>;
 
 export const ResearchRequestSchema = z
   .object({

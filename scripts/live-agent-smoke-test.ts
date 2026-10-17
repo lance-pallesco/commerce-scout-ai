@@ -101,7 +101,7 @@ async function main() {
     }
 
     console.log("Live Claude smoke test succeeded.");
-    console.log(`Boundaries: <=${LIVE_SMOKE_LIMITS.maxTurns} turns, <=$${LIVE_SMOKE_LIMITS.maxBudgetUsd.toFixed(2)} budget, <=${LIVE_SMOKE_LIMITS.timeoutMs / 1_000}s timeout, ${LIVE_SMOKE_LIMITS.maxPages} browser page, <=${LIVE_SMOKE_LIMITS.maxWebSearchUses} Web Search request.`);
+    console.log(`Boundaries: <=${LIVE_SMOKE_LIMITS.maxTurns} SDK conversation turns, <=$${LIVE_SMOKE_LIMITS.maxBudgetUsd.toFixed(2)} budget, <=${LIVE_SMOKE_LIMITS.timeoutMs / 1_000}s timeout, ${LIVE_SMOKE_LIMITS.maxPages} browser page, <=${LIVE_SMOKE_LIMITS.maxWebSearchUses} Web Search request.`);
   } catch (error) {
     const message = error instanceof Error ? error.message.replace(/[\r\n]+/g, " ") : "Unknown smoke-test failure.";
     console.error(`Live smoke test did not succeed: ${message}`);

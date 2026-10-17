@@ -7,7 +7,12 @@ import {
   type ServerConfig,
 } from "@/lib/config/env";
 import type { AgentResearchReport } from "@/lib/agent/contracts";
-import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
+import {
+  ProductCandidateSchema,
+  type ProductCandidate,
+  type ProductPageVerificationSummary,
+  type ResearchRequest,
+} from "@/lib/research/contracts";
 import { ProductEvaluationSchema, type ProductEvaluation } from "@/lib/scoring/score-product";
 import { isSearchDiscoverySource } from "@/lib/research/source-registry";
 import { queryRows, withDatabase } from "@/lib/persistence/database";
@@ -440,10 +445,11 @@ export async function persistResearchResults(
   });
 }
 
-type ResearchReportInput = {
+export type ResearchReportInput = {
   mode: "deterministic_fixture" | "claude_agent";
   agentReport?: AgentResearchReport;
   limitations: string[];
+  verification?: ProductPageVerificationSummary;
 };
 
 function persistResearchBundleInDatabase(
@@ -526,7 +532,18 @@ export async function getResearchProducts(
         WHERE products.job_id = ?`,
       [jobId],
     ).map((row) => {
-      const product = JSON.parse(asString(row.product_json)) as ProductCandidate;
+      const rawProduct = JSON.parse(asString(row.product_json)) as ProductCandidate;
+      // Historical dynamic discoveries predate product-page verification. Keep
+      // them visible as archival leads, but never reclassify them as ranked
+      // source evidence merely because the new status field is absent.
+      const product = ProductCandidateSchema.parse({
+        ...rawProduct,
+        evidenceStatus:
+          rawProduct.evidenceStatus ??
+          (isSearchDiscoverySource(rawProduct.sourceId)
+            ? "search_discovery"
+            : "source_verified"),
+      });
       const rawEvaluation = row.evaluation_json
         ? JSON.parse(asString(row.evaluation_json))
         : null;
@@ -537,7 +554,11 @@ export async function getResearchProducts(
               ...rawEvaluation,
               evidenceScope:
                 (rawEvaluation as { evidenceScope?: unknown }).evidenceScope ??
-                (isSearchDiscoverySource(product.sourceId) ? "search_discovery" : "source_verified"),
+                (product.evidenceStatus === "search_discovery"
+                  ? "search_discovery"
+                  : product.evidenceStatus === "product_page_verified"
+                    ? "product_page_verified"
+                    : "source_verified"),
             })
           : null,
       };

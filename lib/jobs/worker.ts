@@ -1,8 +1,22 @@
 import { randomUUID } from "node:crypto";
 
 import type { ServerConfig } from "@/lib/config/env";
+import type { ResearchJobStatus } from "@/lib/jobs/contracts";
+import {
+  AgentResearchReportSchema,
+  type AgentResearchReport,
+} from "@/lib/agent/contracts";
 import { runResearchAgent, type AgentExecutionEvent } from "@/lib/agent/research-agent";
+import {
+  verifyDiscoveredProductPages,
+  type ProductPageVerificationResult,
+} from "@/lib/research/browser-source";
 import { collectProducts } from "@/lib/research/collection-service";
+import type {
+  ProductCandidate,
+  ProductPageVerificationSummary,
+} from "@/lib/research/contracts";
+import { isSearchDiscoverySource } from "@/lib/research/source-registry";
 import { evaluateProducts } from "@/lib/scoring/score-product";
 
 import {
@@ -22,6 +36,8 @@ export type WorkerRunResult = Readonly<{
   processedJobId?: string;
 }>;
 
+type FinalJobStatus = Extract<ResearchJobStatus, "completed" | "partial" | "failed" | "cancelled">;
+
 class ResearchPersistenceError extends Error {
   readonly estimatedCostUsd: number;
 
@@ -38,6 +54,54 @@ function eventDetail(event: AgentExecutionEvent): string | undefined {
   }
   if ("detail" in event) return event.detail;
   return undefined;
+}
+
+function verificationSummary(
+  result: ProductPageVerificationResult,
+): ProductPageVerificationSummary {
+  return {
+    attemptedLeadCount: result.verifiedProducts.length + result.rejected.length,
+    verifiedCandidateCount: result.verifiedProducts.length,
+    rejectedLeads: result.rejected.map(({ product, code }) => ({
+      name: product.name,
+      sourceUrl: product.sourceUrl,
+      reason: code,
+    })),
+  };
+}
+
+function verificationLimitation(summary: ProductPageVerificationSummary): string | null {
+  if (summary.attemptedLeadCount === 0) return null;
+  if (summary.rejectedLeads.length === 0) {
+    return `${summary.verifiedCandidateCount} dynamically discovered product page${summary.verifiedCandidateCount === 1 ? " was" : "s were"} verified before ranking.`;
+  }
+  const reasonCounts = [...summary.rejectedLeads.reduce((counts, item) => {
+    counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>()).entries()]
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .join(", ");
+  return `${summary.rejectedLeads.length} dynamically discovered lead${summary.rejectedLeads.length === 1 ? " was" : "s were"} not saved or ranked because product-page verification did not pass (${reasonCounts}).`;
+}
+
+export function reconcileVerifiedResearchReport(
+  report: AgentResearchReport | undefined,
+  candidates: readonly ProductCandidate[],
+  summary: ProductPageVerificationSummary,
+  completion: AgentResearchReport["completion"],
+): AgentResearchReport | undefined {
+  if (!report) return undefined;
+  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+  const limitation = verificationLimitation(summary);
+  return AgentResearchReportSchema.parse({
+    ...report,
+    completion,
+    findings: report.findings.filter((finding) => candidateIds.has(finding.productId)),
+    limitations: [...new Set([
+      ...report.limitations,
+      ...(limitation ? [limitation] : []),
+    ])].slice(0, 15),
+  });
 }
 
 async function runFixtureResearch(
@@ -126,18 +190,67 @@ async function runClaudeResearch(
     return agent;
   }
 
+  await appendJobEvent(
+    config,
+    jobId,
+    "agent_cost_summary",
+    `Claude Agent SDK model estimate ${agent.modelEstimatedCostUsd.toFixed(4)} USD + bounded Web Search estimate ${agent.webSearchEstimatedCostUsd.toFixed(4)} USD = ${agent.estimatedCostUsd.toFixed(4)} USD total.`,
+  );
+
+  const dynamicLeads = agent.candidates.filter((candidate) => isSearchDiscoverySource(candidate.sourceId));
+  const directlyVerifiedCandidates = agent.candidates.filter(
+    (candidate) => !isSearchDiscoverySource(candidate.sourceId),
+  );
+  let verifiedDiscoveryCandidates: ProductCandidate[] = [];
+  let verification: ProductPageVerificationSummary | undefined;
+  if (dynamicLeads.length > 0) {
+    await updateJobProgress(config, jobId, { currentStage: "verifying", progressPercent: 72 });
+    await appendJobEvent(
+      config,
+      jobId,
+      "product_page_verification_started",
+      `${dynamicLeads.length} discovered product page${dynamicLeads.length === 1 ? "" : "s"} queued for bounded verification.`,
+    );
+    const pageVerification = await verifyDiscoveredProductPages({
+      products: dynamicLeads,
+      headless: config.browserHeadless,
+      timeoutMs: config.browserTimeoutMs,
+      maxPages: Math.min(config.browserMaxPagesPerRun, job.request.requestedProductCount),
+      signal,
+    });
+    verifiedDiscoveryCandidates = pageVerification.verifiedProducts;
+    verification = verificationSummary(pageVerification);
+    await appendJobEvent(
+      config,
+      jobId,
+      "product_page_verification_completed",
+      `${verification.verifiedCandidateCount}/${verification.attemptedLeadCount} discovered lead${verification.attemptedLeadCount === 1 ? "" : "s"} verified; ${verification.rejectedLeads.length} excluded from rankings.`,
+    );
+  }
+
+  const candidates = [...directlyVerifiedCandidates, ...verifiedDiscoveryCandidates];
+  const status: Extract<FinalJobStatus, "completed" | "partial"> =
+    agent.status === "completed" && candidates.length >= job.request.requestedProductCount
+      ? "completed"
+      : "partial";
+  const report = reconcileVerifiedResearchReport(agent.report, candidates, verification ?? {
+    attemptedLeadCount: 0,
+    verifiedCandidateCount: 0,
+    rejectedLeads: [],
+  }, status);
   await updateJobProgress(config, jobId, { currentStage: "scoring", progressPercent: 75 });
-  const evaluations = evaluateProducts(agent.candidates, job.request, agent.report);
+  const evaluations = evaluateProducts(candidates, job.request, report);
   try {
-    await persistResearchBundle(config, jobId, agent.candidates, evaluations, {
+    await persistResearchBundle(config, jobId, candidates, evaluations, {
       mode: "claude_agent",
-      agentReport: agent.report,
-      limitations: agent.report?.limitations ?? ["The agent did not return a report."],
+      agentReport: report,
+      limitations: report?.limitations ?? ["The agent did not return a report."],
+      verification,
     });
   } catch {
     throw new ResearchPersistenceError(agent.estimatedCostUsd);
   }
-  return agent;
+  return { ...agent, candidates, report, status };
 }
 
 export async function runResearchWorkerOnce(
@@ -182,7 +295,7 @@ export async function runResearchWorkerOnce(
         "The worker health check stopped this run before completion.",
       );
     }
-    const status = healthcheckFailed
+    const status: FinalJobStatus = healthcheckFailed
       ? "failed"
       : cancellationRequested
         ? "cancelled"

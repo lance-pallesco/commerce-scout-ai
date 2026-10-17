@@ -1,6 +1,10 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
-import type { ProductCandidate, SourceDescriptor } from "./contracts";
+import {
+  ProductCandidateSchema,
+  type ProductCandidate,
+  type SourceDescriptor,
+} from "./contracts";
 import {
   type RawProductRecord,
   deduplicateProducts,
@@ -9,7 +13,9 @@ import {
 import {
   SourceAccessError,
   assertApprovedSourceUrl,
+  assertObservedWebUrl,
   isAllowedBrowserRequest,
+  type AddressResolver,
 } from "./url-policy";
 
 export class BrowserCollectionError extends Error {
@@ -43,6 +49,37 @@ type BrowserCollectionStage =
 
 export type BrowserLauncher = (options: { headless: boolean }) => Promise<Browser>;
 
+export type ProductPageVerificationCode =
+  | "VERIFIED"
+  | "PAGE_URL_REJECTED"
+  | "PAGE_REDIRECT_REJECTED"
+  | "PAGE_UNAVAILABLE"
+  | "PAGE_IDENTITY_MISMATCH"
+  | "PAGE_PRICE_MISMATCH"
+  | "PAGE_TIMEOUT"
+  | "PAGE_FETCH_FAILED"
+  | "PAGE_VERIFICATION_LIMIT"
+  | "PAGE_CANCELLED";
+
+export type ProductPageVerification = Readonly<{
+  product: ProductCandidate;
+  verifiedProduct?: ProductCandidate;
+  code: ProductPageVerificationCode;
+}>;
+
+export type ProductPageVerificationEvidence = Readonly<{
+  finalUrl: string;
+  httpStatus: number | null;
+  title: string;
+  bodyText: string;
+  verifiedAt?: string;
+}>;
+
+export type ProductPageVerificationResult = Readonly<{
+  verifiedProducts: ProductCandidate[];
+  rejected: ProductPageVerification[];
+}>;
+
 type PlaywrightBrowserType = Pick<typeof chromium, "launch">;
 
 export function createDefaultBrowserLauncher(
@@ -61,6 +98,16 @@ type BrowserCollectionOptions = Readonly<{
   maxPages: number;
   signal?: AbortSignal;
   launchBrowser?: BrowserLauncher;
+}>;
+
+type DynamicPageVerificationOptions = Readonly<{
+  products: readonly ProductCandidate[];
+  headless: boolean;
+  timeoutMs: number;
+  maxPages: number;
+  signal?: AbortSignal;
+  launchBrowser?: BrowserLauncher;
+  resolveAddresses?: AddressResolver;
 }>;
 
 export function buildCollectionUrl(
@@ -117,6 +164,232 @@ function classifyBrowserError(
     "SOURCE_EXTRACTION_FAILED",
     "The configured catalog could not be collected safely.",
   );
+}
+
+const unavailablePagePattern = /\b(?:404|not[\s-]?found|page[\s-]?not[\s-]?found|no longer available|discontinued|out[\s-]?of[\s-]?stock|sold[\s-]?out)\b/i;
+const nonIdentityTerms = new Set([
+  "and",
+  "for",
+  "from",
+  "product",
+  "products",
+  "with",
+  "the",
+  "this",
+]);
+
+function pageIdentityTerms(value: string): string[] {
+  return [...new Set(
+    value
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((term) => term.length >= 3 && !nonIdentityTerms.has(term)),
+  )];
+}
+
+function hasProductIdentity(product: ProductCandidate, pageText: string): boolean {
+  const terms = pageIdentityTerms(product.name);
+  if (terms.length === 0) return false;
+  const normalizedPageText = pageText.toLowerCase();
+  const matchedTerms = terms.filter((term) => normalizedPageText.includes(term));
+  return matchedTerms.length >= Math.min(2, terms.length);
+}
+
+function containsObservedPrice(product: ProductCandidate, pageText: string): boolean {
+  if (product.price === null) return false;
+  const [whole, decimals] = product.price.toFixed(2).split(".");
+  const amount = decimals === "00"
+    ? `${whole}(?:\\.0{1,2})?`
+    : `${whole}\\.${decimals}`;
+  return new RegExp(`(?:US\\$|USD|\\$)\\s*${amount}(?!\\d)`, "i").test(pageText);
+}
+
+function sameHostname(left: URL, right: URL): boolean {
+  return left.hostname.toLowerCase() === right.hostname.toLowerCase();
+}
+
+function verificationFailure(
+  product: ProductCandidate,
+  code: ProductPageVerificationCode,
+): ProductPageVerification {
+  return { product, code };
+}
+
+/**
+ * Applies deterministic availability, identity, and price checks to text
+ * observed from a product page. The caller must still enforce URL and browser
+ * navigation policy before invoking this helper.
+ */
+export function assessDiscoveredProductPage(
+  product: ProductCandidate,
+  evidence: ProductPageVerificationEvidence,
+): ProductPageVerification {
+  let initialUrl: URL;
+  let finalUrl: URL;
+  try {
+    initialUrl = new URL(product.sourceUrl);
+    finalUrl = new URL(evidence.finalUrl);
+  } catch {
+    return verificationFailure(product, "PAGE_URL_REJECTED");
+  }
+  if (!sameHostname(initialUrl, finalUrl)) {
+    return verificationFailure(product, "PAGE_REDIRECT_REJECTED");
+  }
+  const pageText = `${evidence.title}\n${evidence.bodyText}`.replace(/\s+/g, " ").trim();
+  if (
+    evidence.httpStatus === null ||
+    evidence.httpStatus < 200 ||
+    evidence.httpStatus >= 400 ||
+    pageText.length === 0 ||
+    unavailablePagePattern.test(pageText.slice(0, 20_000))
+  ) {
+    return verificationFailure(product, "PAGE_UNAVAILABLE");
+  }
+  if (!hasProductIdentity(product, pageText)) {
+    return verificationFailure(product, "PAGE_IDENTITY_MISMATCH");
+  }
+  if (!containsObservedPrice(product, pageText)) {
+    return verificationFailure(product, "PAGE_PRICE_MISMATCH");
+  }
+
+  const verifiedAt = evidence.verifiedAt ?? new Date().toISOString();
+  return {
+    product,
+    code: "VERIFIED",
+    verifiedProduct: ProductCandidateSchema.parse({
+      ...product,
+      sourceUrl: finalUrl.toString(),
+      evidenceStatus: "product_page_verified",
+      evidence: [
+        ...product.evidence,
+        {
+          field: "product-page verification",
+          value: "Product page responded successfully with matching identity and observed price.",
+          sourceUrl: finalUrl.toString(),
+          observedAt: verifiedAt,
+          confidence: "high",
+        },
+      ],
+      collectedAt: verifiedAt,
+    }),
+  };
+}
+
+function verificationErrorCode(error: unknown): ProductPageVerificationCode {
+  if (error instanceof SourceAccessError) return "PAGE_URL_REJECTED";
+  if (error instanceof BrowserCollectionError && error.code === "COLLECTION_CANCELLED") {
+    return "PAGE_CANCELLED";
+  }
+  if (error instanceof Error && /timeout/i.test(error.message)) return "PAGE_TIMEOUT";
+  return "PAGE_FETCH_FAILED";
+}
+
+/**
+ * Verify only product URLs that were already returned by the configured Web
+ * Search tool and accepted into this job. Each check is bounded by the
+ * existing browser page limit, permits only same-host document navigation,
+ * disables JavaScript, and rejects redirects, private addresses, unavailable
+ * pages, identity mismatches, and missing observed prices.
+ */
+export async function verifyDiscoveredProductPages(
+  options: DynamicPageVerificationOptions,
+): Promise<ProductPageVerificationResult> {
+  const permitted = options.products.slice(0, Math.max(0, options.maxPages));
+  const rejected: ProductPageVerification[] = options.products
+    .slice(permitted.length)
+    .map((product) => verificationFailure(product, "PAGE_VERIFICATION_LIMIT"));
+  const verifiedProducts: ProductCandidate[] = [];
+  if (permitted.length === 0) return { verifiedProducts, rejected };
+
+  let browser: Browser | undefined;
+  const stopBrowser = () => {
+    void browser?.close().catch(() => undefined);
+  };
+  options.signal?.addEventListener("abort", stopBrowser, { once: true });
+  try {
+    assertNotAborted(options.signal);
+    browser = await (options.launchBrowser ?? createDefaultBrowserLauncher())({
+      headless: options.headless,
+    });
+    for (const product of permitted) {
+      if (options.signal?.aborted) {
+        rejected.push(verificationFailure(product, "PAGE_CANCELLED"));
+        continue;
+      }
+      let context: BrowserContext | undefined;
+      let blockedCrossHostDocument = false;
+      try {
+        const sourceUrl = await assertObservedWebUrl(product.sourceUrl, options.resolveAddresses);
+        const expectedHostname = sourceUrl.hostname.toLowerCase();
+        context = await browser.newContext({ javaScriptEnabled: false });
+        await context.route("**/*", (route) => {
+          const request = route.request();
+          let requestUrl: URL;
+          try {
+            requestUrl = new URL(request.url());
+          } catch {
+            return route.abort("blockedbyclient");
+          }
+          // Only the original public host may serve the top-level document.
+          // No scripts, frames, trackers, or arbitrary redirect destinations
+          // are available to dynamic page verification.
+          if (
+            request.resourceType() !== "document" ||
+            requestUrl.protocol !== "https:" ||
+            requestUrl.hostname.toLowerCase() !== expectedHostname
+          ) {
+            if (
+              request.resourceType() === "document" &&
+              requestUrl.hostname.toLowerCase() !== expectedHostname
+            ) {
+              blockedCrossHostDocument = true;
+            }
+            return route.abort("blockedbyclient");
+          }
+          return route.continue();
+        });
+        const page = await context.newPage();
+        page.setDefaultTimeout(options.timeoutMs);
+        const response = await page.goto(sourceUrl.toString(), {
+          waitUntil: "domcontentloaded",
+          timeout: options.timeoutMs,
+        });
+        const finalUrl = await assertObservedWebUrl(page.url(), options.resolveAddresses);
+        if (!sameHostname(sourceUrl, finalUrl)) {
+          rejected.push(verificationFailure(product, "PAGE_REDIRECT_REJECTED"));
+          continue;
+        }
+        const assessed = assessDiscoveredProductPage(product, {
+          finalUrl: finalUrl.toString(),
+          httpStatus: response?.status() ?? null,
+          title: await page.title(),
+          bodyText: (await page.locator("body").innerText()).slice(0, 40_000),
+        });
+        if (assessed.verifiedProduct) verifiedProducts.push(assessed.verifiedProduct);
+        else rejected.push(assessed);
+      } catch (error) {
+        rejected.push(verificationFailure(
+          product,
+          blockedCrossHostDocument ? "PAGE_REDIRECT_REJECTED" : verificationErrorCode(error),
+        ));
+      } finally {
+        await context?.close().catch(() => undefined);
+      }
+    }
+  } catch (error) {
+    const code = verificationErrorCode(error);
+    const handled = new Set(rejected.map((item) => item.product.id));
+    for (const product of permitted) {
+      if (!handled.has(product.id) && !verifiedProducts.some((item) => item.id === product.id)) {
+        rejected.push(verificationFailure(product, code));
+      }
+    }
+  } finally {
+    options.signal?.removeEventListener("abort", stopBrowser);
+    await browser?.close().catch(() => undefined);
+  }
+
+  return { verifiedProducts, rejected };
 }
 
 export async function extractWebScraperCatalogProducts(

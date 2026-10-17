@@ -1,4 +1,8 @@
-import { ProductCandidateSchema, type ProductCandidate } from "./contracts";
+import {
+  ProductCandidateSchema,
+  type EvidenceStatus,
+  type ProductCandidate,
+} from "./contracts";
 
 export type RawProductRecord = Readonly<{
   externalId?: string | null;
@@ -11,6 +15,7 @@ export type RawProductRecord = Readonly<{
   imageUrl?: string | null;
   collectedAt?: string;
   evidenceConfidence?: "high" | "medium" | "low";
+  evidenceStatus?: EvidenceStatus;
 }>;
 
 export function normalizeWhitespace(value: string): string {
@@ -119,6 +124,7 @@ export function normalizeProduct(
           ]),
     ],
     missingFields,
+    evidenceStatus: raw.evidenceStatus ?? "source_verified",
     collectedAt,
   };
 

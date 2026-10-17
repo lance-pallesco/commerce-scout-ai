@@ -617,6 +617,7 @@ export async function discoverProductsWithWebSearch(input: Readonly<{
         price: observedPrice,
         sourceUrl: sourceUrl.toString(),
         evidenceConfidence: "medium",
+        evidenceStatus: "search_discovery",
         collectedAt: new Date().toISOString(),
       },
       "anthropic-web-discovery",

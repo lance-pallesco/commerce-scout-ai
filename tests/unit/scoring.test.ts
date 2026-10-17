@@ -96,6 +96,7 @@ describe("evidence-based scoring", () => {
       category: null,
       imageUrl: null,
       missingFields: ["category", "imageUrl"],
+      evidenceStatus: "search_discovery" as const,
     };
 
     const evaluation = scoreProduct(product, criteria);
@@ -107,5 +108,20 @@ describe("evidence-based scoring", () => {
     expect(evaluation.score.total).toBeLessThanOrEqual(65);
     expect(evaluation.concerns.join(" ")).toContain("Product-page verification");
     expect(evaluation.missingInformation).toContain("product-page verification");
+  });
+
+  it("treats a successfully verified discovery page as candidate evidence", () => {
+    const product = {
+      ...collectFixtureProducts({ niche: "skincare", limit: 1 }).products[0],
+      id: "anthropic-web-discovery:verified-serum",
+      sourceId: "anthropic-web-discovery",
+      evidenceStatus: "product_page_verified" as const,
+    };
+
+    const evaluation = scoreProduct(product, criteria);
+
+    expect(evaluation.evidenceScope).toBe("product_page_verified");
+    expect(evaluation.score.total).toBe(100);
+    expect(evaluation.missingInformation).not.toContain("product-page verification");
   });
 });

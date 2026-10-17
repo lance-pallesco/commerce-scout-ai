@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { getResearchSource, listCompatibleResearchSources } from "@/lib/research/source-registry";
+import {
+  getResearchSource,
+  listCompatibleResearchSources,
+  resolveResearchSourceIds,
+} from "@/lib/research/source-registry";
 import {
   SourceAccessError,
   assertApprovedSourceUrl,
@@ -40,5 +44,19 @@ describe("browser source policy", () => {
     expect(listCompatibleResearchSources("garden tractors", "live").map((item) => item.id)).toEqual([
       "anthropic-web-discovery",
     ]);
+  });
+
+  it("uses only bounded Web Search for automatic live discovery while retaining explicit adapters", () => {
+    expect(resolveResearchSourceIds({
+      niche: "furniture",
+      mode: "live",
+      selection: "automatic",
+    })).toEqual(["anthropic-web-discovery"]);
+    expect(resolveResearchSourceIds({
+      niche: "furniture",
+      mode: "live",
+      selection: "manual",
+      sourceIds: ["ikea-public-search"],
+    })).toEqual(["ikea-public-search"]);
   });
 });

@@ -3,7 +3,6 @@ import { z } from "zod";
 import type { AgentProductFinding, AgentResearchReport } from "@/lib/agent/contracts";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
 import { productMatchesNiche } from "@/lib/research/normalize";
-import { isSearchDiscoverySource } from "@/lib/research/source-registry";
 
 export const ScoreBreakdownSchema = z.object({
   priceFit: z.number().int().min(0).max(25),
@@ -17,7 +16,7 @@ export const ProductEvaluationSchema = z.object({
   productId: z.string().min(1),
   score: ScoreBreakdownSchema,
   evidenceQuality: z.enum(["high", "medium", "low"]),
-  evidenceScope: z.enum(["source_verified", "search_discovery"]).default("source_verified"),
+  evidenceScope: z.enum(["source_verified", "product_page_verified", "search_discovery"]).default("source_verified"),
   observedStrengths: z.array(z.string().min(1)).max(10),
   concerns: z.array(z.string().min(1)).max(15),
   missingInformation: z.array(z.string().min(1)).max(20),
@@ -65,7 +64,7 @@ export function scoreProduct(
 ): Omit<ProductEvaluation, "agentFinding"> {
   const observedStrengths: string[] = [];
   const concerns: string[] = [];
-  const searchDiscoveryOnly = isSearchDiscoverySource(product.sourceId);
+  const searchDiscoveryOnly = product.evidenceStatus === "search_discovery";
   const priceFit =
     product.price !== null &&
     product.price >= request.minimumPrice &&
@@ -117,7 +116,11 @@ export function scoreProduct(
     productId: product.id,
     score: { priceFit, evidenceQuality, nicheRelevance, informationCompleteness, total },
     evidenceQuality: evidenceLevel,
-    evidenceScope: searchDiscoveryOnly ? "search_discovery" : "source_verified",
+    evidenceScope: searchDiscoveryOnly
+      ? "search_discovery"
+      : product.evidenceStatus === "product_page_verified"
+        ? "product_page_verified"
+        : "source_verified",
     observedStrengths,
     concerns,
     missingInformation,
