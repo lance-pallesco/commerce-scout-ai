@@ -46,7 +46,26 @@ export const ProductCandidateSchema = z.object({
 export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
 export type EvidenceStatus = z.infer<typeof EvidenceStatusSchema>;
 
+// A Web Search citation is useful for choosing a bounded product-page check,
+// but it is not itself a product candidate.  In particular, its snippet can
+// omit or stale-date a price.  Keep this representation separate so only a
+// page-verified ProductCandidate can enter scoring, persistence, or export.
+export const DiscoveryLeadSchema = z.object({
+  id: z.string().min(1).max(160),
+  sourceId: z.string().min(1).max(80),
+  externalId: z.string().min(1).max(160),
+  title: z.string().min(1).max(240),
+  snippet: z.string().max(4_000).nullable(),
+  observedPrice: z.number().finite().nonnegative().nullable(),
+  currency: CurrencySchema.nullable(),
+  sourceUrl: z.string().url().max(2_000),
+  observedAt: z.string().datetime(),
+});
+
+export type DiscoveryLead = z.infer<typeof DiscoveryLeadSchema>;
+
 export const ProductPageVerificationSummarySchema = z.object({
+  queuedLeadCount: z.number().int().nonnegative().default(0),
   attemptedLeadCount: z.number().int().nonnegative(),
   verifiedCandidateCount: z.number().int().nonnegative(),
   rejectedLeads: z.array(z.object({

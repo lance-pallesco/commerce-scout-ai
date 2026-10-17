@@ -60,20 +60,21 @@ function verificationSummary(
   result: ProductPageVerificationResult,
 ): ProductPageVerificationSummary {
   return {
-    attemptedLeadCount: result.verifiedProducts.length + result.rejected.length,
+    queuedLeadCount: result.queuedLeadCount,
+    attemptedLeadCount: result.attemptedLeadCount,
     verifiedCandidateCount: result.verifiedProducts.length,
-    rejectedLeads: result.rejected.map(({ product, code }) => ({
-      name: product.name,
-      sourceUrl: product.sourceUrl,
+    rejectedLeads: result.rejected.map(({ lead, code }) => ({
+      name: lead.title,
+      sourceUrl: lead.sourceUrl,
       reason: code,
     })),
   };
 }
 
 function verificationLimitation(summary: ProductPageVerificationSummary): string | null {
-  if (summary.attemptedLeadCount === 0) return null;
+  if (summary.queuedLeadCount === 0) return null;
   if (summary.rejectedLeads.length === 0) {
-    return `${summary.verifiedCandidateCount} dynamically discovered product page${summary.verifiedCandidateCount === 1 ? " was" : "s were"} verified before ranking.`;
+    return `${summary.verifiedCandidateCount}/${summary.attemptedLeadCount} bounded product-page verification attempt${summary.attemptedLeadCount === 1 ? "" : "s"} produced verified candidates before ranking.`;
   }
   const reasonCounts = [...summary.rejectedLeads.reduce((counts, item) => {
     counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1);
@@ -81,7 +82,7 @@ function verificationLimitation(summary: ProductPageVerificationSummary): string
   }, new Map<string, number>()).entries()]
     .map(([reason, count]) => `${reason}: ${count}`)
     .join(", ");
-  return `${summary.rejectedLeads.length} dynamically discovered lead${summary.rejectedLeads.length === 1 ? " was" : "s were"} not saved or ranked because product-page verification did not pass (${reasonCounts}).`;
+  return `${summary.rejectedLeads.length} of ${summary.queuedLeadCount} dynamically discovered lead${summary.queuedLeadCount === 1 ? " was" : "s were"} not saved or ranked because bounded product-page verification did not pass (${reasonCounts}).`;
 }
 
 export function reconcileVerifiedResearchReport(
@@ -197,7 +198,7 @@ async function runClaudeResearch(
     `Claude Agent SDK model estimate ${agent.modelEstimatedCostUsd.toFixed(4)} USD + bounded Web Search estimate ${agent.webSearchEstimatedCostUsd.toFixed(4)} USD = ${agent.estimatedCostUsd.toFixed(4)} USD total.`,
   );
 
-  const dynamicLeads = agent.candidates.filter((candidate) => isSearchDiscoverySource(candidate.sourceId));
+  const dynamicLeads = agent.discoveryLeads;
   const directlyVerifiedCandidates = agent.candidates.filter(
     (candidate) => !isSearchDiscoverySource(candidate.sourceId),
   );
@@ -212,10 +213,13 @@ async function runClaudeResearch(
       `${dynamicLeads.length} discovered product page${dynamicLeads.length === 1 ? "" : "s"} queued for bounded verification.`,
     );
     const pageVerification = await verifyDiscoveredProductPages({
-      products: dynamicLeads,
+      leads: dynamicLeads,
+      niche: job.request.niche,
+      minimumPrice: job.request.minimumPrice,
+      maximumPrice: job.request.maximumPrice,
       headless: config.browserHeadless,
       timeoutMs: config.browserTimeoutMs,
-      maxPages: Math.min(config.browserMaxPagesPerRun, job.request.requestedProductCount),
+      maxPages: Math.min(config.browserMaxPagesPerRun, dynamicLeads.length),
       signal,
     });
     verifiedDiscoveryCandidates = pageVerification.verifiedProducts;
@@ -224,7 +228,7 @@ async function runClaudeResearch(
       config,
       jobId,
       "product_page_verification_completed",
-      `${verification.verifiedCandidateCount}/${verification.attemptedLeadCount} discovered lead${verification.attemptedLeadCount === 1 ? "" : "s"} verified; ${verification.rejectedLeads.length} excluded from rankings.`,
+      `${verification.verifiedCandidateCount}/${verification.queuedLeadCount} discovered lead${verification.queuedLeadCount === 1 ? "" : "s"} verified; ${verification.attemptedLeadCount} page checks attempted; ${verification.rejectedLeads.length} excluded from rankings.`,
     );
   }
 
@@ -234,6 +238,7 @@ async function runClaudeResearch(
       ? "completed"
       : "partial";
   const report = reconcileVerifiedResearchReport(agent.report, candidates, verification ?? {
+    queuedLeadCount: 0,
     attemptedLeadCount: 0,
     verifiedCandidateCount: 0,
     rejectedLeads: [],

@@ -47,6 +47,12 @@ function countAvailableEvidence(product: ProductCandidate): number {
   ].filter((value) => value !== null && value !== undefined && value !== "").length;
 }
 
+function matchesRequestedNiche(product: ProductCandidate, niche: string): boolean {
+  return productMatchesNiche(product, niche) || product.evidence.some(
+    (evidence) => evidence.field === "product-page niche verification" && evidence.confidence === "high",
+  );
+}
+
 function buildAgentFinding(finding: AgentProductFinding | undefined) {
   if (!finding) return undefined;
   return {
@@ -90,9 +96,9 @@ export function scoreProduct(
     concerns.push("Core catalog evidence is incomplete.");
   }
 
-  const nicheRelevance = productMatchesNiche(product, request.niche) ? 20 : 0;
+  const nicheRelevance = matchesRequestedNiche(product, request.niche) ? 20 : 0;
   if (nicheRelevance === 20) {
-    observedStrengths.push("Observed title, category, or description matches the selected niche.");
+    observedStrengths.push("Observed source or product-page evidence matches the selected niche.");
   } else {
     concerns.push("The collected record does not match the selected niche.");
   }

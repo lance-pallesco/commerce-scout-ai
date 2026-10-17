@@ -1,6 +1,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import {
+  type DiscoveryLead,
   ProductCandidateSchema,
   type ProductCandidate,
   type SourceDescriptor,
@@ -9,6 +10,7 @@ import {
   type RawProductRecord,
   deduplicateProducts,
   normalizeProduct,
+  productMatchesNiche,
 } from "./normalize";
 import {
   SourceAccessError,
@@ -55,14 +57,16 @@ export type ProductPageVerificationCode =
   | "PAGE_REDIRECT_REJECTED"
   | "PAGE_UNAVAILABLE"
   | "PAGE_IDENTITY_MISMATCH"
-  | "PAGE_PRICE_MISMATCH"
+  | "PAGE_PRICE_NOT_OBSERVED"
+  | "PAGE_PRICE_OUT_OF_RANGE"
+  | "PAGE_NICHE_MISMATCH"
   | "PAGE_TIMEOUT"
   | "PAGE_FETCH_FAILED"
   | "PAGE_VERIFICATION_LIMIT"
   | "PAGE_CANCELLED";
 
 export type ProductPageVerification = Readonly<{
-  product: ProductCandidate;
+  lead: DiscoveryLead;
   verifiedProduct?: ProductCandidate;
   code: ProductPageVerificationCode;
 }>;
@@ -76,6 +80,8 @@ export type ProductPageVerificationEvidence = Readonly<{
 }>;
 
 export type ProductPageVerificationResult = Readonly<{
+  queuedLeadCount: number;
+  attemptedLeadCount: number;
   verifiedProducts: ProductCandidate[];
   rejected: ProductPageVerification[];
 }>;
@@ -101,7 +107,10 @@ type BrowserCollectionOptions = Readonly<{
 }>;
 
 type DynamicPageVerificationOptions = Readonly<{
-  products: readonly ProductCandidate[];
+  leads: readonly DiscoveryLead[];
+  niche: string;
+  minimumPrice: number;
+  maximumPrice: number;
   headless: boolean;
   timeoutMs: number;
   maxPages: number;
@@ -187,21 +196,25 @@ function pageIdentityTerms(value: string): string[] {
   )];
 }
 
-function hasProductIdentity(product: ProductCandidate, pageText: string): boolean {
-  const terms = pageIdentityTerms(product.name);
+function hasProductIdentity(lead: DiscoveryLead, pageText: string): boolean {
+  const terms = pageIdentityTerms(lead.title);
   if (terms.length === 0) return false;
   const normalizedPageText = pageText.toLowerCase();
   const matchedTerms = terms.filter((term) => normalizedPageText.includes(term));
   return matchedTerms.length >= Math.min(2, terms.length);
 }
 
-function containsObservedPrice(product: ProductCandidate, pageText: string): boolean {
-  if (product.price === null) return false;
-  const [whole, decimals] = product.price.toFixed(2).split(".");
-  const amount = decimals === "00"
-    ? `${whole}(?:\\.0{1,2})?`
-    : `${whole}\\.${decimals}`;
-  return new RegExp(`(?:US\\$|USD|\\$)\\s*${amount}(?!\\d)`, "i").test(pageText);
+function observedUsdPrice(pageText: string): number | null {
+  const match = pageText.replace(/,/g, "").match(/(?:US\$|USD|\$)\s*(\d+(?:\.\d{1,2})?)/i);
+  if (!match) return null;
+  const price = Number(match[1]);
+  return Number.isFinite(price) && price >= 0 ? price : null;
+}
+
+function pageMatchesNiche(pageText: string, niche: string): boolean {
+  const terms = niche.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length >= 3);
+  const normalizedPageText = pageText.toLowerCase();
+  return terms.length > 0 && terms.every((term) => normalizedPageText.includes(term));
 }
 
 function sameHostname(left: URL, right: URL): boolean {
@@ -209,10 +222,10 @@ function sameHostname(left: URL, right: URL): boolean {
 }
 
 function verificationFailure(
-  product: ProductCandidate,
+  lead: DiscoveryLead,
   code: ProductPageVerificationCode,
 ): ProductPageVerification {
-  return { product, code };
+  return { lead, code };
 }
 
 /**
@@ -221,19 +234,20 @@ function verificationFailure(
  * navigation policy before invoking this helper.
  */
 export function assessDiscoveredProductPage(
-  product: ProductCandidate,
+  lead: DiscoveryLead,
   evidence: ProductPageVerificationEvidence,
+  criteria: Readonly<{ niche: string; minimumPrice: number; maximumPrice: number }>,
 ): ProductPageVerification {
   let initialUrl: URL;
   let finalUrl: URL;
   try {
-    initialUrl = new URL(product.sourceUrl);
+    initialUrl = new URL(lead.sourceUrl);
     finalUrl = new URL(evidence.finalUrl);
   } catch {
-    return verificationFailure(product, "PAGE_URL_REJECTED");
+    return verificationFailure(lead, "PAGE_URL_REJECTED");
   }
   if (!sameHostname(initialUrl, finalUrl)) {
-    return verificationFailure(product, "PAGE_REDIRECT_REJECTED");
+    return verificationFailure(lead, "PAGE_REDIRECT_REJECTED");
   }
   const pageText = `${evidence.title}\n${evidence.bodyText}`.replace(/\s+/g, " ").trim();
   if (
@@ -243,28 +257,61 @@ export function assessDiscoveredProductPage(
     pageText.length === 0 ||
     unavailablePagePattern.test(pageText.slice(0, 20_000))
   ) {
-    return verificationFailure(product, "PAGE_UNAVAILABLE");
+    return verificationFailure(lead, "PAGE_UNAVAILABLE");
   }
-  if (!hasProductIdentity(product, pageText)) {
-    return verificationFailure(product, "PAGE_IDENTITY_MISMATCH");
+  if (!hasProductIdentity(lead, pageText)) {
+    return verificationFailure(lead, "PAGE_IDENTITY_MISMATCH");
   }
-  if (!containsObservedPrice(product, pageText)) {
-    return verificationFailure(product, "PAGE_PRICE_MISMATCH");
+  const price = observedUsdPrice(pageText);
+  if (price === null) {
+    return verificationFailure(lead, "PAGE_PRICE_NOT_OBSERVED");
+  }
+  if (price < criteria.minimumPrice || price > criteria.maximumPrice) {
+    return verificationFailure(lead, "PAGE_PRICE_OUT_OF_RANGE");
   }
 
   const verifiedAt = evidence.verifiedAt ?? new Date().toISOString();
+  const verifiedProduct = normalizeProduct(
+    {
+      externalId: lead.externalId,
+      name: lead.title,
+      // The browser obtains the full page only for deterministic validation.
+      // Do not persist unrestricted page text or provider snippets as a
+      // product description; the page title remains traceable provenance.
+      description: evidence.title,
+      category: null,
+      price,
+      sourceUrl: finalUrl.toString(),
+      evidenceConfidence: "high",
+      evidenceStatus: "product_page_verified",
+      collectedAt: verifiedAt,
+    },
+    lead.sourceId,
+    finalUrl.toString(),
+  );
+  if (!verifiedProduct) return verificationFailure(lead, "PAGE_FETCH_FAILED");
+  if (!productMatchesNiche(verifiedProduct, criteria.niche) && !pageMatchesNiche(pageText, criteria.niche)) {
+    return verificationFailure(lead, "PAGE_NICHE_MISMATCH");
+  }
   return {
-    product,
+    lead,
     code: "VERIFIED",
     verifiedProduct: ProductCandidateSchema.parse({
-      ...product,
+      ...verifiedProduct,
       sourceUrl: finalUrl.toString(),
       evidenceStatus: "product_page_verified",
       evidence: [
-        ...product.evidence,
+        ...verifiedProduct.evidence,
         {
           field: "product-page verification",
-          value: "Product page responded successfully with matching identity and observed price.",
+          value: "Product page responded successfully with matching identity, niche, and observed price.",
+          sourceUrl: finalUrl.toString(),
+          observedAt: verifiedAt,
+          confidence: "high",
+        },
+        {
+          field: "product-page niche verification",
+          value: "Product page text contained every selected niche term.",
           sourceUrl: finalUrl.toString(),
           observedAt: verifiedAt,
           confidence: "high",
@@ -294,12 +341,20 @@ function verificationErrorCode(error: unknown): ProductPageVerificationCode {
 export async function verifyDiscoveredProductPages(
   options: DynamicPageVerificationOptions,
 ): Promise<ProductPageVerificationResult> {
-  const permitted = options.products.slice(0, Math.max(0, options.maxPages));
-  const rejected: ProductPageVerification[] = options.products
+  const permitted = options.leads.slice(0, Math.max(0, options.maxPages));
+  const rejected: ProductPageVerification[] = options.leads
     .slice(permitted.length)
-    .map((product) => verificationFailure(product, "PAGE_VERIFICATION_LIMIT"));
+    .map((lead) => verificationFailure(lead, "PAGE_VERIFICATION_LIMIT"));
   const verifiedProducts: ProductCandidate[] = [];
-  if (permitted.length === 0) return { verifiedProducts, rejected };
+  let attemptedLeadCount = 0;
+  if (permitted.length === 0) {
+    return {
+      queuedLeadCount: options.leads.length,
+      attemptedLeadCount: 0,
+      verifiedProducts,
+      rejected,
+    };
+  }
 
   let browser: Browser | undefined;
   const stopBrowser = () => {
@@ -311,15 +366,16 @@ export async function verifyDiscoveredProductPages(
     browser = await (options.launchBrowser ?? createDefaultBrowserLauncher())({
       headless: options.headless,
     });
-    for (const product of permitted) {
+    for (const lead of permitted) {
       if (options.signal?.aborted) {
-        rejected.push(verificationFailure(product, "PAGE_CANCELLED"));
+        rejected.push(verificationFailure(lead, "PAGE_CANCELLED"));
         continue;
       }
+      attemptedLeadCount += 1;
       let context: BrowserContext | undefined;
       let blockedCrossHostDocument = false;
       try {
-        const sourceUrl = await assertObservedWebUrl(product.sourceUrl, options.resolveAddresses);
+        const sourceUrl = await assertObservedWebUrl(lead.sourceUrl, options.resolveAddresses);
         const expectedHostname = sourceUrl.hostname.toLowerCase();
         context = await browser.newContext({ javaScriptEnabled: false });
         await context.route("**/*", (route) => {
@@ -356,20 +412,20 @@ export async function verifyDiscoveredProductPages(
         });
         const finalUrl = await assertObservedWebUrl(page.url(), options.resolveAddresses);
         if (!sameHostname(sourceUrl, finalUrl)) {
-          rejected.push(verificationFailure(product, "PAGE_REDIRECT_REJECTED"));
+          rejected.push(verificationFailure(lead, "PAGE_REDIRECT_REJECTED"));
           continue;
         }
-        const assessed = assessDiscoveredProductPage(product, {
+        const assessed = assessDiscoveredProductPage(lead, {
           finalUrl: finalUrl.toString(),
           httpStatus: response?.status() ?? null,
           title: await page.title(),
           bodyText: (await page.locator("body").innerText()).slice(0, 40_000),
-        });
+        }, options);
         if (assessed.verifiedProduct) verifiedProducts.push(assessed.verifiedProduct);
         else rejected.push(assessed);
       } catch (error) {
         rejected.push(verificationFailure(
-          product,
+          lead,
           blockedCrossHostDocument ? "PAGE_REDIRECT_REJECTED" : verificationErrorCode(error),
         ));
       } finally {
@@ -378,10 +434,10 @@ export async function verifyDiscoveredProductPages(
     }
   } catch (error) {
     const code = verificationErrorCode(error);
-    const handled = new Set(rejected.map((item) => item.product.id));
-    for (const product of permitted) {
-      if (!handled.has(product.id) && !verifiedProducts.some((item) => item.id === product.id)) {
-        rejected.push(verificationFailure(product, code));
+    const handled = new Set(rejected.map((item) => item.lead.id));
+    for (const lead of permitted) {
+      if (!handled.has(lead.id) && !verifiedProducts.some((item) => item.id === lead.id)) {
+        rejected.push(verificationFailure(lead, code));
       }
     }
   } finally {
@@ -389,7 +445,12 @@ export async function verifyDiscoveredProductPages(
     await browser?.close().catch(() => undefined);
   }
 
-  return { verifiedProducts, rejected };
+  return {
+    queuedLeadCount: options.leads.length,
+    attemptedLeadCount,
+    verifiedProducts,
+    rejected,
+  };
 }
 
 export async function extractWebScraperCatalogProducts(

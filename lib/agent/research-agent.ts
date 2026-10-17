@@ -11,7 +11,11 @@ import {
   routedAgentModel,
   type ServerConfig,
 } from "@/lib/config/env";
-import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
+import type {
+  DiscoveryLead,
+  ProductCandidate,
+  ResearchRequest,
+} from "@/lib/research/contracts";
 import { isSearchDiscoverySource } from "@/lib/research/source-registry";
 import {
   discoverySearchResultLimit,
@@ -81,6 +85,7 @@ export type AgentRunResult = Readonly<{
   status: "completed" | "partial" | "failed" | "cancelled";
   report?: AgentResearchReport;
   candidates: ProductCandidate[];
+  discoveryLeads: DiscoveryLead[];
   estimatedCostUsd: number;
   modelEstimatedCostUsd: number;
   webSearchEstimatedCostUsd: number;
@@ -305,7 +310,7 @@ function classifyResult(
 
 function validateReport(
   output: unknown,
-  candidates: readonly ProductCandidate[],
+  evidenceRecords: readonly Readonly<{ id: string }>[],
 ): AgentResearchReport {
   const report = AgentResearchReportSchema.safeParse(output);
   if (!report.success) {
@@ -315,7 +320,7 @@ function validateReport(
     );
   }
 
-  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+  const candidateIds = new Set(evidenceRecords.map((record) => record.id));
   if (report.data.findings.some((finding) => !candidateIds.has(finding.productId))) {
     throw new AgentExecutionError(
       "AGENT_INVALID_OUTPUT",
@@ -363,14 +368,13 @@ function terminalResultDetails(
 }
 
 const SEARCH_DISCOVERY_LIMITATION =
-  "Search-result discoveries retain observed titles, snippets, and URLs, but their product pages were not independently verified by an approved browser source.";
+  "Search-result discoveries contain observed titles, snippets, and URLs, but their product pages were not independently verified by an approved browser source.";
 
 function applyEvidenceCompletionBoundary(
   report: AgentResearchReport,
-  candidates: readonly ProductCandidate[],
+  discoveryLeads: readonly DiscoveryLead[],
 ): AgentResearchReport {
-  const hasSearchDiscovery = candidates.some((candidate) => isSearchDiscoverySource(candidate.sourceId));
-  if (!hasSearchDiscovery) return report;
+  if (discoveryLeads.length === 0) return report;
 
   return AgentResearchReportSchema.parse({
     ...report,
@@ -381,6 +385,7 @@ function applyEvidenceCompletionBoundary(
 function toFailure(
   error: unknown,
   candidates: ProductCandidate[],
+  discoveryLeads: DiscoveryLead[],
   startedAt: number,
   result?: SDKResultMessage,
   additionalCostUsd = 0,
@@ -397,6 +402,7 @@ function toFailure(
   return {
     status,
     candidates,
+    discoveryLeads,
     estimatedCostUsd: (result?.total_cost_usd ?? 0) + additionalCostUsd,
     modelEstimatedCostUsd: result?.total_cost_usd ?? 0,
     webSearchEstimatedCostUsd: additionalCostUsd,
@@ -416,6 +422,7 @@ export async function runResearchAgent(
   let finalResult: SDKResultMessage | undefined;
   let apiFailureDiagnostic: ApiFailureDiagnostic | undefined;
   let collectedCandidates: ProductCandidate[] = [];
+  let collectedDiscoveryLeads: DiscoveryLead[] = [];
   let apiResponseObserved = false;
   let abortReason: "cancelled" | "timeout" | "no_progress" | undefined;
   const propagateCancellation = () => {
@@ -562,11 +569,12 @@ export async function runResearchAgent(
     await mcp.waitForPendingOperations?.();
     if (abortController.signal.aborted) throw interruptionError();
     collectedCandidates = mcp.getCandidates();
+    collectedDiscoveryLeads = mcp.getDiscoveryLeads?.() ?? [];
     const structuredOutput =
       "structured_output" in finalResult ? finalResult.structured_output : undefined;
     const report = applyEvidenceCompletionBoundary(
-      validateReport(structuredOutput, collectedCandidates),
-      collectedCandidates,
+      validateReport(structuredOutput, [...collectedCandidates, ...collectedDiscoveryLeads]),
+      collectedDiscoveryLeads,
     );
     await emit({ type: "agent_structured_output_validated", at: new Date().toISOString() });
     await emit({ type: "agent_completed", at: new Date().toISOString() });
@@ -575,6 +583,7 @@ export async function runResearchAgent(
       status: report.completion,
       report,
       candidates: collectedCandidates,
+      discoveryLeads: collectedDiscoveryLeads,
       estimatedCostUsd: finalResult.total_cost_usd + (mcp.getAdditionalCostUsd?.() ?? 0),
       modelEstimatedCostUsd: finalResult.total_cost_usd,
       webSearchEstimatedCostUsd: mcp.getAdditionalCostUsd?.() ?? 0,
@@ -589,6 +598,7 @@ export async function runResearchAgent(
           ? (classifyResult(finalResult, options.config, apiFailureDiagnostic) ?? error)
           : error,
       collectedCandidates,
+      collectedDiscoveryLeads,
       startedAt,
       finalResult,
       mcp?.getAdditionalCostUsd?.() ?? 0,

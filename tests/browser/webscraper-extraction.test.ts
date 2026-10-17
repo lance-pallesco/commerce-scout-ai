@@ -10,24 +10,23 @@ import {
   extractStructuredSearchProducts,
   extractWebScraperCatalogProducts,
 } from "@/lib/research/browser-source";
-import type { ProductCandidate } from "@/lib/research/contracts";
-import { collectFixtureProducts } from "@/lib/research/fixture-source";
+import type { DiscoveryLead } from "@/lib/research/contracts";
 import { getResearchSource } from "@/lib/research/source-registry";
 
 const source = getResearchSource("webscraper-ecommerce-demo", "live");
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 
-function discoveryLead(): ProductCandidate {
-  const fixture = collectFixtureProducts({ niche: "skincare", limit: 1 }).products[0];
+function discoveryLead(): DiscoveryLead {
   return {
-    ...fixture,
     id: "anthropic-web-discovery:verified-glow-serum",
     sourceId: "anthropic-web-discovery",
     externalId: "verified-glow-serum",
-    name: "Verified Glow Serum",
-    price: 29,
+    title: "Verified Glow Serum",
+    snippet: null,
+    observedPrice: null,
+    currency: null,
     sourceUrl: "https://shop.example/products/verified-glow-serum",
-    evidenceStatus: "search_discovery",
+    observedAt: "2026-10-17T00:00:00.000Z",
   };
 }
 
@@ -175,7 +174,7 @@ describe("webscraper product extraction", () => {
       httpStatus: 404,
       title: "Page not found",
       bodyText: "The requested product is no longer available.",
-    });
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
 
     expect(verification).toMatchObject({ code: "PAGE_UNAVAILABLE" });
     expect(verification.verifiedProduct).toBeUndefined();
@@ -186,22 +185,57 @@ describe("webscraper product extraction", () => {
     const verified = assessDiscoveredProductPage(lead, {
       finalUrl: lead.sourceUrl,
       httpStatus: 200,
-      title: "Verified Glow Serum",
-      bodyText: "Verified Glow Serum is available now for $29.00.",
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum skincare is available now for $29.00.",
       verifiedAt: "2026-10-17T00:00:00.000Z",
-    });
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
     const redirected = assessDiscoveredProductPage(lead, {
       finalUrl: "https://untrusted.example/products/verified-glow-serum",
       httpStatus: 200,
-      title: "Verified Glow Serum",
-      bodyText: "Verified Glow Serum is available now for $29.00.",
-    });
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum skincare is available now for $29.00.",
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
 
     expect(verified.verifiedProduct).toMatchObject({
       evidenceStatus: "product_page_verified",
       sourceUrl: lead.sourceUrl,
+      price: 29,
     });
     expect(redirected).toMatchObject({ code: "PAGE_REDIRECT_REJECTED" });
     expect(redirected.verifiedProduct).toBeUndefined();
+  });
+
+  it("uses a page-observed price when a discovery citation had no price", () => {
+    const lead = discoveryLead();
+
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum skincare is $31.50 on this product page.",
+      verifiedAt: "2026-10-17T00:00:00.000Z",
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(lead.observedPrice).toBeNull();
+    expect(verification).toMatchObject({ code: "VERIFIED" });
+    expect(verification.verifiedProduct).toMatchObject({
+      price: 31.5,
+      currency: "USD",
+      evidenceStatus: "product_page_verified",
+    });
+  });
+
+  it("rejects a page-observed price outside the submitted range", () => {
+    const lead = discoveryLead();
+
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum skincare is $125.00 on this product page.",
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(verification).toMatchObject({ code: "PAGE_PRICE_OUT_OF_RANGE" });
+    expect(verification.verifiedProduct).toBeUndefined();
   });
 });

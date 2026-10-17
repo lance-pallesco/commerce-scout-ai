@@ -26,7 +26,7 @@ const sources = [
     supportedCategories: ["general-products"],
     availability: "available",
     supportedModes: ["live"],
-    allowedCapabilities: ["list", "collect", "details"],
+    allowedCapabilities: ["list", "details"],
     searchable: true,
     collectionStrategy: "anthropic-web-search",
     allowedHosts: [],

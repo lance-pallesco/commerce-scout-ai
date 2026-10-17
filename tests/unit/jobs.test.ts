@@ -174,6 +174,7 @@ describe("SQLite research jobs", () => {
     });
 
     const reconciled = reconcileVerifiedResearchReport(report, [], {
+      queuedLeadCount: 1,
       attemptedLeadCount: 1,
       verifiedCandidateCount: 0,
       rejectedLeads: [{

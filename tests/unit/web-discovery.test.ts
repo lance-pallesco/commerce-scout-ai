@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { getServerConfig } from "@/lib/config/env";
-import { discoverProductsWithWebSearch } from "@/lib/research/web-discovery";
+import {
+  buildDiscoverySearchQuery,
+  discoverProductsWithWebSearch,
+} from "@/lib/research/web-discovery";
 
 const config = getServerConfig({
   RESEARCH_MODE: "live",
@@ -59,7 +62,14 @@ function openRouterCitationResponse(
 }
 
 describe("Anthropic web discovery", () => {
-  it("converts observable priced search results into niche-matched candidates", async () => {
+  it("keeps Claude's product-focused niche query from being duplicated", () => {
+    expect(buildDiscoverySearchQuery("furniture", "furniture storage cabinet under 60 USD"))
+      .toBe("furniture storage cabinet under 60 USD");
+    expect(buildDiscoverySearchQuery("furniture", "storage cabinet under 60 USD"))
+      .toBe("furniture storage cabinet under 60 USD");
+  });
+
+  it("returns observable citations as verification-eligible leads without ranking them", async () => {
     let requestBody: Record<string, unknown> | undefined;
     const result = await discoverProductsWithWebSearch({
       niche: "skincare",
@@ -94,20 +104,15 @@ describe("Anthropic web discovery", () => {
       resolveAddresses: async () => ["93.184.216.34"],
     });
 
-    expect(result.products).toHaveLength(1);
-    expect(result.products[0]).toMatchObject({
+    expect(result.leads).toHaveLength(2);
+    expect(result.leads[0]).toMatchObject({
       sourceId: "anthropic-web-discovery",
-      name: "Hydrating Skincare Face Serum",
-      price: 24.99,
-      category: null,
+      title: "Hydrating Skincare Face Serum",
+      observedPrice: 24.99,
       sourceUrl: "https://products.example.com/serum",
     });
-    expect(result.products[0].evidence).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ field: "name", confidence: "medium" }),
-        expect.objectContaining({ field: "price", confidence: "medium" }),
-      ]),
-    );
+    expect(result.diagnostics.priceMismatchCount).toBe(1);
+    expect(result.diagnostics.hitDiagnostics).toHaveLength(2);
     expect(result.searchUses).toBe(1);
     expect(result.estimatedCostUsd).toBeGreaterThan(0.01);
     expect(requestBody).toMatchObject({
@@ -149,7 +154,7 @@ describe("Anthropic web discovery", () => {
       resolveAddresses: async () => ["93.184.216.34"],
     });
 
-    expect(result.products).toHaveLength(1);
+    expect(result.leads).toHaveLength(1);
     expect(requestUrl).toBe("https://openrouter.ai/api/v1/messages");
     expect(requestHeaders?.get("authorization")).toBe("Bearer openrouter-test-key");
     expect(requestHeaders?.get("x-api-key")).toBeNull();
@@ -171,7 +176,7 @@ describe("Anthropic web discovery", () => {
     expect(result.estimatedCostUsd).toBe(0.007);
   });
 
-  it("requests bounded headroom so an out-of-range first hit does not hide a valid candidate", async () => {
+  it("returns bounded search headroom as leads and records preliminary price signals", async () => {
     const limitedOpenRouterConfig = getServerConfig({
       RESEARCH_MODE: "live",
       AI_PROVIDER: "openrouter",
@@ -188,8 +193,7 @@ describe("Anthropic web discovery", () => {
       query: "desk organizer",
       minimumPrice: 15,
       maximumPrice: 60,
-      // The smoke path needs one persisted candidate, but discovery should
-      // receive the configured three-result ceiling before filtering.
+      // Discovery receives bounded headroom before browser verification.
       limit: 1,
       config: limitedOpenRouterConfig,
       fetchImpl: async (_url, init) => {
@@ -225,12 +229,11 @@ describe("Anthropic web discovery", () => {
         },
       }],
     });
-    expect(result.products).toEqual([
-      expect.objectContaining({
-        name: "Bamboo Desk Organizer",
-        price: 29.99,
-      }),
-    ]);
+    expect(result.leads).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "Desk Organizer", observedPrice: 9.99 }),
+      expect.objectContaining({ title: "Bamboo Desk Organizer", observedPrice: 29.99 }),
+    ]));
+    expect(result.diagnostics.priceMismatchCount).toBe(1);
   });
 
   it("accepts OpenRouter citations returned through a Chat Completions compatibility envelope", async () => {
@@ -264,10 +267,10 @@ describe("Anthropic web discovery", () => {
       resolveAddresses: async () => ["93.184.216.34"],
     });
 
-    expect(result.products).toHaveLength(1);
-    expect(result.products[0]).toMatchObject({
-      name: "Skincare Face Serum",
-      price: 29,
+    expect(result.leads).toHaveLength(1);
+    expect(result.leads[0]).toMatchObject({
+      title: "Skincare Face Serum",
+      observedPrice: 29,
       sourceUrl: "https://products.example.com/chat-envelope-serum",
     });
   });
@@ -396,12 +399,12 @@ describe("Anthropic web discovery", () => {
       resolveAddresses: async () => ["127.0.0.1"],
     })).rejects.toMatchObject({
       code: "WEB_SEARCH_NO_RESULTS",
-      diagnostics: expect.objectContaining({ rejectedUrlCount: 1, validCandidateCount: 0 }),
+      diagnostics: expect.objectContaining({ rejectedUrlCount: 1, verificationEligibleLeadCount: 0 }),
     });
   });
 
-  it("reports a niche mismatch instead of accepting a generic modifier as proof", async () => {
-    await expect(discoverProductsWithWebSearch({
+  it("keeps a preliminary niche mismatch as a lead for page verification", async () => {
+    const result = await discoverProductsWithWebSearch({
       niche: "wireless earbuds",
       query: "affordable wireless earbuds",
       minimumPrice: 10,
@@ -424,14 +427,14 @@ describe("Anthropic web discovery", () => {
           },
         ]),
       resolveAddresses: async () => ["93.184.216.34"],
-    })).rejects.toMatchObject({
-      code: "WEB_SEARCH_NO_RESULTS",
-      diagnostics: expect.objectContaining({ nicheMismatchCount: 1, validCandidateCount: 0 }),
     });
+    expect(result.leads).toHaveLength(1);
+    expect(result.diagnostics).toMatchObject({ nicheMismatchCount: 1, verificationEligibleLeadCount: 1 });
+    expect(result.diagnostics.hitDiagnostics[0]?.signals).toContain("niche_unconfirmed");
   });
 
-  it("reports observable result counts and rejection reasons when citations lack a usable price", async () => {
-    await expect(discoverProductsWithWebSearch({
+  it("keeps a citation without a price for later product-page verification", async () => {
+    const result = await discoverProductsWithWebSearch({
       niche: "skincare",
       query: "gentle face serum",
       minimumPrice: 15,
@@ -449,11 +452,12 @@ describe("Anthropic web discovery", () => {
         },
       ]),
       resolveAddresses: async () => ["93.184.216.34"],
-    })).rejects.toMatchObject({
-      code: "WEB_SEARCH_NO_RESULTS",
-      message: expect.stringContaining("Search hits: 1; validated candidates: 0; rejected: 1"),
-      diagnostics: expect.objectContaining({ missingPriceCount: 1 }),
     });
+    expect(result.leads).toEqual([
+      expect.objectContaining({ title: "Gentle Skincare Face Serum", observedPrice: null }),
+    ]);
+    expect(result.diagnostics).toMatchObject({ missingPriceCount: 1, verificationEligibleLeadCount: 1 });
+    expect(result.diagnostics.hitDiagnostics[0]?.signals).toContain("missing_observed_price");
   });
 
   it("fails closed when the search response has no usable results", async () => {

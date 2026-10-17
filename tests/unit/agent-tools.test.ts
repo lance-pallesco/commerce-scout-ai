@@ -13,7 +13,10 @@ import {
   createResearchToolDefinitions,
 } from "@/lib/agent/research-tools";
 import { collectFixtureProducts } from "@/lib/research/fixture-source";
-import { ResearchRequestSchema, type ProductCandidate } from "@/lib/research/contracts";
+import {
+  ResearchRequestSchema,
+  type DiscoveryLead,
+} from "@/lib/research/contracts";
 
 const request = ResearchRequestSchema.parse({
   niche: "skincare",
@@ -95,7 +98,8 @@ describe("research MCP tools", () => {
       discover({ niche: "camping lantern", query: "rechargeable portable", limit: 2 }),
     ).resolves.toMatchObject({
       structuredContent: {
-        products: [expect.objectContaining({ name: "Rechargeable Camping Lantern", price: 29.99 })],
+        leads: [expect.objectContaining({ title: "Rechargeable Camping Lantern", observedPrice: 29.99 })],
+        collectionStatus: "discovery_leads_available",
       },
     });
   });
@@ -124,6 +128,35 @@ describe("research MCP tools", () => {
         error: {
           code: "SOURCE_NOT_APPROVED",
           message: "Attempt discover_products before using a catalog fallback for this live research job.",
+        },
+      },
+    });
+  });
+
+  it("does not route collect_products to a discovery-only source", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "camping lantern",
+      minimumPrice: 10,
+      maximumPrice: 100,
+      requestedProductCount: 1,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find a portable camping lantern product with source evidence.",
+    });
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+    });
+    const collect = handlerFor(definitions, "collect_products");
+
+    await expect(
+      collect({ sourceId: "anthropic-web-discovery", niche: "camping lantern", limit: 1 }),
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "SOURCE_NOT_COLLECTABLE",
+          message: expect.stringContaining("discover_products"),
         },
       },
     });
@@ -362,7 +395,7 @@ describe("research MCP tools", () => {
     });
   });
 
-  it("persists safe Web Search result counts without storing provider response text", async () => {
+  it("records safe Web Search lead counts without persisting provider response text", async () => {
     const liveRequest = ResearchRequestSchema.parse({
       niche: "skincare",
       minimumPrice: 15,
@@ -399,12 +432,16 @@ describe("research MCP tools", () => {
     await expect(
       discover({ niche: "skincare", query: "face serum", limit: 1 }),
     ).resolves.toMatchObject({
-      isError: true,
-      structuredContent: { error: { code: "WEB_SEARCH_NO_RESULTS" } },
+      structuredContent: {
+        leads: [expect.objectContaining({ observedPrice: null })],
+        metadata: {
+          diagnostics: expect.objectContaining({ missingPriceCount: 1, verificationEligibleLeadCount: 1 }),
+        },
+      },
     });
-    const failure = events.find((event) => event.type === "tool_failed");
-    expect(failure?.detail).toContain("Search hits: 1; validated candidates: 0; rejected: 1");
-    expect(failure?.detail).not.toContain("Provider response text");
+    const completion = events.find((event) => event.type === "tool_completed");
+    expect(completion?.detail).toContain("1 verification-eligible leads");
+    expect(completion?.detail).not.toContain("Provider response text");
   });
 
   it("persists an actionable sanitized Web Search failure detail", async () => {
@@ -708,14 +745,16 @@ describe("research MCP tools", () => {
   });
 
   it("retains the agent report's verification limitation until the worker verifies its search leads", async () => {
-    const fixtureProduct = collectFixtureProducts({ niche: "skincare", limit: 1 }).products[0];
-    const candidates: ProductCandidate[] = [{
-      ...fixtureProduct,
+    const leads: DiscoveryLead[] = [{
       id: "anthropic-web-discovery:hydrating-serum",
       sourceId: "anthropic-web-discovery",
-      category: null,
-      imageUrl: null,
-      missingFields: ["category", "imageUrl"],
+      externalId: "hydrating-serum",
+      title: "Hydrating Skincare Serum",
+      snippet: "Observed search citation only.",
+      observedPrice: 29,
+      currency: "USD",
+      sourceUrl: "https://products.example.com/hydrating-serum",
+      observedAt: "2026-10-17T00:00:00.000Z",
     }];
     const dynamicRequest = ResearchRequestSchema.parse({
       niche: "skincare",
@@ -741,7 +780,7 @@ describe("research MCP tools", () => {
             executiveSummary: "A search result returned one matching candidate.",
             limitations: [],
             findings: [{
-              productId: candidates[0].id,
+              productId: leads[0].id,
               summary: "A search result included a price snippet.",
               customerAppeal: "Requires independent verification.",
               differentiationConsiderations: [],
@@ -754,7 +793,8 @@ describe("research MCP tools", () => {
       },
       mcpServerFactory: () => ({
         server: {} as ReturnType<typeof createResearchMcpServer>["server"],
-        getCandidates: () => candidates,
+        getCandidates: () => [],
+        getDiscoveryLeads: () => leads,
       }),
     });
 

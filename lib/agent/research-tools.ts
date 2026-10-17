@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import type { ServerConfig } from "@/lib/config/env";
 import type {
+  DiscoveryLead,
   ProductCandidate,
   ResearchRequest,
   SourceDescriptor,
@@ -11,7 +12,10 @@ import { BrowserCollectionError } from "@/lib/research/browser-source";
 import { collectProducts } from "@/lib/research/collection-service";
 import { getFixtureProductDetails } from "@/lib/research/fixture-source";
 import { deduplicateProducts } from "@/lib/research/normalize";
-import { listResearchSources } from "@/lib/research/source-registry";
+import {
+  getResearchSource,
+  listResearchSources,
+} from "@/lib/research/source-registry";
 import {
   discoverySearchResultLimit,
   discoverProductsWithWebSearch,
@@ -48,6 +52,7 @@ export class AgentToolGuardrailError extends Error {
     | "TOOL_ACTION_LIMIT"
     | "TOOL_NO_PROGRESS"
     | "SOURCE_NOT_APPROVED"
+    | "SOURCE_NOT_COLLECTABLE"
     | "PRODUCT_NOT_DISCOVERED";
 
   constructor(
@@ -56,6 +61,7 @@ export class AgentToolGuardrailError extends Error {
       | "TOOL_ACTION_LIMIT"
       | "TOOL_NO_PROGRESS"
       | "SOURCE_NOT_APPROVED"
+    | "SOURCE_NOT_COLLECTABLE"
       | "PRODUCT_NOT_DISCOVERED",
     message: string,
   ) {
@@ -77,6 +83,7 @@ export type ResearchToolContext = Readonly<{
 
 type MutableResearchToolContext = ResearchToolContext & {
   candidates: ProductCandidate[];
+  discoveryLeads: DiscoveryLead[];
   actionFingerprints: Map<string, number>;
   consecutiveNoProgressActions: number;
   webSearchCostUsd: number;
@@ -158,9 +165,9 @@ function fingerprintAction(
 
 function recordCollectionProgress(
   context: MutableResearchToolContext,
-  candidateCountBeforeCollection: number,
+  evidenceCountBeforeCollection: number,
 ): void {
-  if (context.candidates.length > candidateCountBeforeCollection) {
+  if (availableEvidenceCount(context) > evidenceCountBeforeCollection) {
     context.consecutiveNoProgressActions = 0;
     return;
   }
@@ -177,6 +184,37 @@ function recordCollectionProgress(
   );
 }
 
+function availableEvidenceCount(context: MutableResearchToolContext): number {
+  return context.candidates.length + context.discoveryLeads.length;
+}
+
+function deduplicateDiscoveryLeads(leads: readonly DiscoveryLead[]): DiscoveryLead[] {
+  const seen = new Set<string>();
+  return leads.filter((lead) => {
+    const key = `${lead.sourceId}\u0000${lead.sourceUrl.toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function compactDiscoveryHitDiagnostics(
+  diagnostics: Awaited<ReturnType<typeof discoverProductsWithWebSearch>>["diagnostics"],
+): string {
+  const detail = diagnostics.hitDiagnostics
+    .map((hit) => {
+      const signals = hit.signals.length > 0 ? `(${hit.signals.join("+")})` : "";
+      return `#${hit.ordinal}:${hit.disposition}${signals}`;
+    })
+    .join(", ");
+  return detail.slice(0, 700);
+}
+
+function discoveryEventDetail(result: Awaited<ReturnType<typeof discoverProductsWithWebSearch>>): string {
+  return `${result.searchUses} search request${result.searchUses === 1 ? "" : "s"}; ${result.diagnostics.searchHitCount} search hits; ${result.leads.length} verification-eligible leads; ${result.diagnostics.rejectedRecordCount} structurally rejected; ${result.rejectedUrlCount} URLs rejected; ${result.estimatedCostUsd.toFixed(4)} USD estimated; hit dispositions ${compactDiscoveryHitDiagnostics(result.diagnostics)}`
+    .slice(0, 980);
+}
+
 function approvedSource(context: MutableResearchToolContext, sourceId: string): void {
   if (!context.request.sourceIds.includes(sourceId)) {
     throw new AgentToolGuardrailError(
@@ -190,6 +228,7 @@ function buildToolContext(context: ResearchToolContext): MutableResearchToolCont
   return {
     ...context,
     candidates: [],
+    discoveryLeads: [],
     actionFingerprints: new Map(),
     consecutiveNoProgressActions: 0,
     webSearchCostUsd: 0,
@@ -268,6 +307,13 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
       try {
         assertActive(state);
         approvedSource(state, input.sourceId);
+        const source = getResearchSource(input.sourceId, state.request.mode);
+        if (source.type === "web-search") {
+          throw new AgentToolGuardrailError(
+            "SOURCE_NOT_COLLECTABLE",
+            "This discovery-only source must be used with discover_products; collect_products cannot browse arbitrary search-result URLs.",
+          );
+        }
         if (input.niche.toLowerCase() !== state.request.niche.toLowerCase()) {
           throw new AgentToolGuardrailError(
             "SOURCE_NOT_APPROVED",
@@ -290,7 +336,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           // otherwise the timeline falsely attributes that wait to browser
           // collection and an already-sufficient discovery can waste a turn.
           await waitForEvidenceOperations(state);
-          if (state.candidates.length >= state.request.requestedProductCount) {
+          if (availableEvidenceCount(state) >= state.request.requestedProductCount) {
             throw new AgentToolGuardrailError(
               "TOOL_NO_PROGRESS",
               "Dynamic discovery already returned enough matching candidates; do not collect an unnecessary catalog fallback.",
@@ -299,7 +345,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         }
         fingerprintAction(state, toolName, input);
         await recordEvent(state, "tool_started", toolName, `sourceId=${input.sourceId}`);
-        const candidateCountBeforeCollection = state.candidates.length;
+        const evidenceCountBeforeCollection = availableEvidenceCount(state);
         const finishEvidenceOperation = beginEvidenceOperation(state);
         let result: Awaited<ReturnType<typeof collectProducts>>;
         try {
@@ -323,7 +369,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           ...state.candidates,
           ...result.products,
         ]).products;
-        recordCollectionProgress(state, candidateCountBeforeCollection);
+        recordCollectionProgress(state, evidenceCountBeforeCollection);
         const data = {
           products: result.products,
           metadata: result.metadata,
@@ -445,20 +491,20 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             "Web Search cost exceeded the configured research budget.",
           );
         }
-        const candidateCountBeforeCollection = state.candidates.length;
-        state.candidates = deduplicateProducts([
-          ...state.candidates,
-          ...result.products,
-        ]).products;
-        recordCollectionProgress(state, candidateCountBeforeCollection);
+        const evidenceCountBeforeCollection = availableEvidenceCount(state);
+        state.discoveryLeads = deduplicateDiscoveryLeads([
+          ...state.discoveryLeads,
+          ...result.leads,
+        ]);
+        recordCollectionProgress(state, evidenceCountBeforeCollection);
         await recordEvent(
           state,
           "tool_completed",
           toolName,
-          `${result.searchUses} search request${result.searchUses === 1 ? "" : "s"}; ${result.diagnostics.searchHitCount} search hits; ${result.products.length} validated products; ${result.diagnostics.rejectedRecordCount} records rejected; ${result.rejectedUrlCount} URLs rejected; ${result.estimatedCostUsd.toFixed(4)} USD estimated`,
+          discoveryEventDetail(result),
         );
         return toolSuccess({
-          products: result.products,
+          leads: result.leads,
           metadata: {
             sourceId: "anthropic-web-discovery",
             searchUses: result.searchUses,
@@ -467,7 +513,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             estimatedCostUsd: result.estimatedCostUsd,
             diagnostics: result.diagnostics,
           },
-          collectionStatus: "completed" as const,
+          collectionStatus: "discovery_leads_available" as const,
         });
       } catch (error) {
         await recordEvent(state, "tool_failed", toolName, safeFailureDetail(error));
@@ -504,6 +550,8 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         const discovered = state.candidates.find(
           (candidate) =>
             candidate.id === input.productId && candidate.sourceId === input.sourceId,
+        ) ?? state.discoveryLeads.find(
+          (lead) => lead.id === input.productId && lead.sourceId === input.sourceId,
         );
         if (!discovered) {
           throw new AgentToolGuardrailError(
@@ -516,7 +564,10 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             ? getFixtureProductDetails(input.productId)
             : null;
         const product = fixtureDetails ?? discovered;
-        const data = { product, unavailableFields: product.missingFields };
+        const data = {
+          product,
+          unavailableFields: "missingFields" in product ? product.missingFields : ["product-page verification"],
+        };
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);
       } catch (error) {
@@ -529,7 +580,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
 
   const getCandidates = tool(
     "get_research_candidates",
-    "Return collected, normalized candidates and their source evidence for the active research job.",
+    "Return collected product candidates and unverified discovery leads for the active research job. Discovery leads cannot be ranked or saved unless later page verification succeeds.",
     {
       offset: z.number().int().min(0).max(100).optional().describe("Result offset"),
       limit: z.number().int().min(1).max(25).optional().describe("Result limit"),
@@ -545,8 +596,9 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         const limit = input.limit ?? 25;
         const data = {
           candidates: state.candidates.slice(offset, offset + limit),
-          total: state.candidates.length,
-          collectionStatus: state.candidates.length > 0 ? "available" : "not_started",
+          discoveryLeads: state.discoveryLeads.slice(offset, offset + limit),
+          total: availableEvidenceCount(state),
+          collectionStatus: availableEvidenceCount(state) > 0 ? "available" : "not_started",
         };
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);
@@ -596,6 +648,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
   return {
     tools: [listSources, discoverProductsTool, collectProductsTool, getProductDetails, getCandidates, getCriteria],
     getCandidates: () => [...state.candidates],
+    getDiscoveryLeads: () => [...state.discoveryLeads],
     getAdditionalCostUsd: () => state.webSearchCostUsd,
     waitForPendingOperations: () => waitForEvidenceOperations(state),
   };
@@ -629,6 +682,7 @@ function toToolFailure(error: unknown) {
 export type ResearchMcpServer = Readonly<{
   server: ReturnType<typeof createSdkMcpServer>;
   getCandidates: () => ProductCandidate[];
+  getDiscoveryLeads?: () => DiscoveryLead[];
   getAdditionalCostUsd?: () => number;
   waitForPendingOperations?: () => Promise<void>;
 }>;
@@ -646,6 +700,7 @@ export function createResearchMcpServer(context: ResearchToolContext): ResearchM
       timeout: context.config.browserTimeoutMs,
     }),
     getCandidates: definition.getCandidates,
+    getDiscoveryLeads: definition.getDiscoveryLeads,
     getAdditionalCostUsd: definition.getAdditionalCostUsd,
     waitForPendingOperations: definition.waitForPendingOperations,
   };
