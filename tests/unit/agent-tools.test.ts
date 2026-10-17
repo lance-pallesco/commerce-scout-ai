@@ -611,9 +611,56 @@ describe("research MCP tools", () => {
     expect(events).toContainEqual(expect.objectContaining({
       type: "agent_api_response_observed",
       detail:
-        "Anthropic API response rejected. SDK category invalid_request. Request ID req_01SanitizedDiagnostic.",
+        "Anthropic API response rejected. SDK category invalid_request. Request ID req_01SanitizedDiagnostic. Provider message unavailable.",
     }));
     expect(events.some((event) => event.detail?.includes("Raw SDK error text"))).toBe(false);
+  });
+
+  it("surfaces a sanitized provider usage-limit message from the SDK synthetic assistant error", async () => {
+    const events: AgentExecutionEvent[] = [];
+    const result = await runResearchAgent({
+      request,
+      config,
+      queryExecutor: async function* () {
+        yield {
+          type: "assistant",
+          error: "unknown",
+          request_id: "req_01UsageLimit",
+          message: {
+            content: [{
+              type: "text",
+              text:
+                "API Error: 400 You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.",
+            }],
+          },
+        } as unknown as SDKMessage;
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          terminal_reason: "api_error",
+          api_error_status: 400,
+          total_cost_usd: 0,
+          num_turns: 1,
+          result: "unknown",
+        } as unknown as SDKMessage;
+      },
+      onEvent: (event) => {
+        events.push(event);
+      },
+    });
+
+    expect(result.sanitizedErrorMessage).toBe(
+      "Anthropic rejected the outer Claude Agent SDK request; HTTP 400; SDK category unknown; request ID req_01UsageLimit. You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.",
+    );
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "agent_api_response_observed",
+      detail: expect.stringContaining("You have reached your specified API usage limits."),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "agent_terminal_result",
+      detail: expect.stringContaining("provider message You have reached your specified API usage limits."),
+    }));
   });
 
   it("persists a parsed provider request error without exposing prompts or credentials", async () => {

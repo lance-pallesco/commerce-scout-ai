@@ -132,6 +132,22 @@ function safeProviderText(value: unknown, maximum = 280): string | undefined {
     .slice(0, maximum);
 }
 
+function providerMessageFromAssistantError(message: SDKAssistantMessage): string | undefined {
+  if (!message.error) return undefined;
+
+  // The CLI represents some pre-stream API rejections as a synthetic
+  // assistant text block instead of copying them to the terminal result. Only
+  // accept its narrowly-defined API-error prefix; all other model text remains
+  // untrusted and is never persisted as a diagnostic.
+  for (const block of message.message?.content ?? []) {
+    if (block.type !== "text") continue;
+    const match = /^API Error:\s*\d{3}\s+(.+)$/i.exec(block.text);
+    const providerMessage = safeProviderText(match?.[1]);
+    if (providerMessage) return providerMessage;
+  }
+  return undefined;
+}
+
 function providerErrorFromTerminalResult(result: SDKResultMessage): Pick<
   ApiFailureDiagnostic,
   "providerErrorType" | "providerMessage"
@@ -157,6 +173,18 @@ function providerErrorFromTerminalResult(result: SDKResultMessage): Pick<
   } catch {
     return {};
   }
+}
+
+function withTerminalProviderDiagnostic(
+  result: SDKResultMessage,
+  diagnostic?: ApiFailureDiagnostic,
+): ApiFailureDiagnostic {
+  const terminalDiagnostic = providerErrorFromTerminalResult(result);
+  return {
+    ...diagnostic,
+    providerErrorType: terminalDiagnostic.providerErrorType ?? diagnostic?.providerErrorType,
+    providerMessage: terminalDiagnostic.providerMessage ?? diagnostic?.providerMessage,
+  };
 }
 
 function apiFailureDescription(
@@ -194,10 +222,7 @@ function classifyResult(
     if (result.terminal_reason === "api_error") {
       return new AgentExecutionError(
         "AGENT_API_ERROR",
-        apiFailureDescription(result, {
-          ...apiFailureDiagnostic,
-          ...providerErrorFromTerminalResult(result),
-        }),
+        apiFailureDescription(result, withTerminalProviderDiagnostic(result, apiFailureDiagnostic)),
       );
     }
     if (result.terminal_reason === "model_error") {
@@ -280,10 +305,7 @@ function terminalResultDetails(
     details.push(`Anthropic HTTP ${result.api_error_status}`);
   }
   if (result.subtype === "success" && result.terminal_reason === "api_error") {
-    const diagnostic = {
-      ...apiFailureDiagnostic,
-      ...providerErrorFromTerminalResult(result),
-    };
+    const diagnostic = withTerminalProviderDiagnostic(result, apiFailureDiagnostic);
     if (diagnostic.providerErrorType) details.push(`provider type ${diagnostic.providerErrorType}`);
     else if (diagnostic.sdkCategory) details.push(`SDK category ${diagnostic.sdkCategory}`);
     if (diagnostic.requestId) details.push(`request ID ${diagnostic.requestId}`);
@@ -436,9 +458,12 @@ export async function runResearchAgent(
         });
       }
       if (message.type === "assistant" && message.error) {
+        const providerMessage = providerMessageFromAssistantError(message);
         apiFailureDiagnostic = {
-          requestId: safeRequestId(message.request_id),
+          ...apiFailureDiagnostic,
+          requestId: safeRequestId(message.request_id) ?? apiFailureDiagnostic?.requestId,
           sdkCategory: message.error,
+          providerMessage: providerMessage ?? apiFailureDiagnostic?.providerMessage,
         };
       }
       if (message.type === "assistant" && !apiResponseObserved) {
@@ -453,6 +478,9 @@ export async function runResearchAgent(
                 apiFailureDiagnostic?.requestId
                   ? `Request ID ${apiFailureDiagnostic.requestId}.`
                   : "Request ID unavailable.",
+                apiFailureDiagnostic?.providerMessage
+                  ? `Provider message ${apiFailureDiagnostic.providerMessage}`
+                  : "Provider message unavailable.",
               ].join(" ")
             : "Anthropic response observed.",
         });
