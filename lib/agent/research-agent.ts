@@ -1,4 +1,9 @@
-import { query, type SDKMessage, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query,
+  type SDKAssistantMessage,
+  type SDKMessage,
+  type SDKResultMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 
 import {
   assertLiveResearchAvailable,
@@ -96,6 +101,79 @@ export class AgentExecutionError extends Error {
   }
 }
 
+type ApiFailureDiagnostic = Readonly<{
+  requestId?: string;
+  sdkCategory?: SDKAssistantMessage["error"];
+  providerErrorType?: string;
+  providerMessage?: string;
+}>;
+
+const REQUEST_ID_PATTERN = /^req_[A-Za-z0-9_-]+$/;
+const PROVIDER_ERROR_TYPE_PATTERN = /^[a-z][a-z0-9_]{0,79}$/;
+
+function safeRequestId(value: unknown): string | undefined {
+  return typeof value === "string" && REQUEST_ID_PATTERN.test(value) ? value : undefined;
+}
+
+function safeProviderText(value: unknown, maximum = 280): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized || /^(unknown|success|api error|error)$/i.test(normalized)) return undefined;
+
+  // Provider error messages are expected to identify invalid request fields,
+  // not echo prompts. Do not surface a value that looks like one, and redact
+  // credential-shaped fragments defensively before it reaches persistence.
+  if (/\b(?:prompt|system prompt|user message|messages?\[|content\[)\b/i.test(normalized)) {
+    return undefined;
+  }
+  return normalized
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/gi, "[redacted-api-key]")
+    .replace(/\b(?:bearer|x-api-key|authorization)\s*[:=]?\s*[^\s,;]+/gi, "$1 [redacted]")
+    .slice(0, maximum);
+}
+
+function providerErrorFromTerminalResult(result: SDKResultMessage): Pick<
+  ApiFailureDiagnostic,
+  "providerErrorType" | "providerMessage"
+> {
+  if (result.subtype !== "success" || result.terminal_reason !== "api_error") return {};
+  const serialized = result.result.trim();
+  const objectStart = serialized.indexOf("{");
+  if (objectStart < 0) return {};
+
+  try {
+    const payload: unknown = JSON.parse(serialized.slice(objectStart));
+    if (!payload || typeof payload !== "object") return {};
+    const error = (payload as { error?: unknown }).error;
+    if (!error || typeof error !== "object") return {};
+    const record = error as { type?: unknown; message?: unknown };
+    return {
+      providerErrorType:
+        typeof record.type === "string" && PROVIDER_ERROR_TYPE_PATTERN.test(record.type)
+          ? record.type
+          : undefined,
+      providerMessage: safeProviderText(record.message),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function apiFailureDescription(
+  result: SDKResultMessage,
+  diagnostic?: ApiFailureDiagnostic,
+): string {
+  const details = ["Anthropic rejected the outer Claude Agent SDK request"];
+  if (result.subtype === "success" && typeof result.api_error_status === "number") {
+    details.push(`HTTP ${result.api_error_status}`);
+  }
+  if (diagnostic?.providerErrorType) details.push(`provider type ${diagnostic.providerErrorType}`);
+  else if (diagnostic?.sdkCategory) details.push(`SDK category ${diagnostic.sdkCategory}`);
+  if (diagnostic?.requestId) details.push(`request ID ${diagnostic.requestId}`);
+  if (diagnostic?.providerMessage) return `${details.join("; ")}. ${diagnostic.providerMessage}`;
+  return `${details.join("; ")}. The SDK did not provide a safe provider error message.`;
+}
+
 function userPrompt(request: ResearchRequest): string {
   return [
     "Run the approved product research workflow and return the structured report.",
@@ -107,13 +185,19 @@ function userPrompt(request: ResearchRequest): string {
   ].join("\n");
 }
 
-function classifyResult(result: SDKResultMessage): AgentExecutionError | null {
+function classifyResult(
+  result: SDKResultMessage,
+  apiFailureDiagnostic?: ApiFailureDiagnostic,
+): AgentExecutionError | null {
   if (result.subtype === "success" && !result.is_error) return null;
   if (result.subtype === "success" && result.is_error) {
     if (result.terminal_reason === "api_error") {
       return new AgentExecutionError(
         "AGENT_API_ERROR",
-        "Claude returned an API error before research tools could run.",
+        apiFailureDescription(result, {
+          ...apiFailureDiagnostic,
+          ...providerErrorFromTerminalResult(result),
+        }),
       );
     }
     if (result.terminal_reason === "model_error") {
@@ -174,7 +258,10 @@ function validateReport(
   return report.data;
 }
 
-function terminalResultDetails(result: SDKResultMessage): string[] {
+function terminalResultDetails(
+  result: SDKResultMessage,
+  apiFailureDiagnostic?: ApiFailureDiagnostic,
+): string[] {
   const details = [
     `${result.subtype}${result.is_error ? " (error)" : ""}`,
     `structured output ${"structured_output" in result && result.structured_output !== undefined ? "received" : "missing"}`,
@@ -191,6 +278,17 @@ function terminalResultDetails(result: SDKResultMessage): string[] {
     result.api_error_status <= 599
   ) {
     details.push(`Anthropic HTTP ${result.api_error_status}`);
+  }
+  if (result.subtype === "success" && result.terminal_reason === "api_error") {
+    const diagnostic = {
+      ...apiFailureDiagnostic,
+      ...providerErrorFromTerminalResult(result),
+    };
+    if (diagnostic.providerErrorType) details.push(`provider type ${diagnostic.providerErrorType}`);
+    else if (diagnostic.sdkCategory) details.push(`SDK category ${diagnostic.sdkCategory}`);
+    if (diagnostic.requestId) details.push(`request ID ${diagnostic.requestId}`);
+    if (diagnostic.providerMessage) details.push(`provider message ${diagnostic.providerMessage}`);
+    else details.push("provider message unavailable");
   }
   if (Number.isFinite(result.total_cost_usd)) {
     details.push(`${result.total_cost_usd.toFixed(4)} USD estimated`);
@@ -251,6 +349,7 @@ export async function runResearchAgent(
   const abortController = new AbortController();
   let mcp: ResearchMcpServer | undefined;
   let finalResult: SDKResultMessage | undefined;
+  let apiFailureDiagnostic: ApiFailureDiagnostic | undefined;
   let collectedCandidates: ProductCandidate[] = [];
   let apiResponseObserved = false;
   let abortReason: "cancelled" | "timeout" | "no_progress" | undefined;
@@ -336,12 +435,26 @@ export async function runResearchAgent(
           detail: `${registeredResearchTools.length}/${RESEARCH_ALLOWED_TOOLS.length} approved MCP tools registered`,
         });
       }
+      if (message.type === "assistant" && message.error) {
+        apiFailureDiagnostic = {
+          requestId: safeRequestId(message.request_id),
+          sdkCategory: message.error,
+        };
+      }
       if (message.type === "assistant" && !apiResponseObserved) {
         apiResponseObserved = true;
         await emit({
           type: "agent_api_response_observed",
           at: new Date().toISOString(),
-          detail: "Anthropic response observed.",
+          detail: message.error
+            ? [
+                "Anthropic API response rejected.",
+                `SDK category ${message.error}.`,
+                apiFailureDiagnostic?.requestId
+                  ? `Request ID ${apiFailureDiagnostic.requestId}.`
+                  : "Request ID unavailable.",
+              ].join(" ")
+            : "Anthropic response observed.",
         });
       }
       if (message.type === "result") {
@@ -351,7 +464,7 @@ export async function runResearchAgent(
         await emit({
           type: "agent_terminal_result",
           at: new Date().toISOString(),
-          detail: terminalResultDetails(message).join("; "),
+          detail: terminalResultDetails(message, apiFailureDiagnostic).join("; "),
         });
         if (hasStructuredOutput) {
           await emit({ type: "agent_structured_output_received", at: new Date().toISOString() });
@@ -368,7 +481,7 @@ export async function runResearchAgent(
         "The research agent ended without a final result.",
       );
     }
-    const resultError = classifyResult(finalResult);
+    const resultError = classifyResult(finalResult, apiFailureDiagnostic);
     if (resultError) throw resultError;
     // The SDK may dispatch independent MCP calls in one assistant turn. Never
     // snapshot candidates or cost while a bounded evidence operation is still
@@ -398,7 +511,7 @@ export async function runResearchAgent(
       abortController.signal.aborted
         ? interruptionError()
         : finalResult
-          ? (classifyResult(finalResult) ?? error)
+          ? (classifyResult(finalResult, apiFailureDiagnostic) ?? error)
           : error,
       collectedCandidates,
       startedAt,

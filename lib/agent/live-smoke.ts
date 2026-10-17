@@ -113,8 +113,10 @@ export function inspectLiveSmokeRun(input: Readonly<{
     jobId: job.id,
     runtimeMode: job.request.mode,
     sdkInitialization: initialized?.detail ?? "not observed",
-    anthropicRequest: apiResponse
-      ? "response observed"
+    anthropicRequest: apiResponse?.detail
+      ? apiResponse.detail
+      : apiResponse
+        ? "response observed"
       : terminalResult
         ? "terminal result observed"
         : "not observed",

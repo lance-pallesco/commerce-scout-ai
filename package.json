@@ -17,7 +17,7 @@
     "smoke:live": "tsx scripts/live-agent-smoke-test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.301",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.302",
     "@base-ui/react": "^1.9.0",
     "@next/env": "^16.4.2",
     "class-variance-authority": "^0.7.1",

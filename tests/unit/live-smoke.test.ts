@@ -86,7 +86,7 @@ describe("live Claude smoke-test boundaries", () => {
     expect(inspection).toMatchObject({
       passed: true,
       sdkInitialization: "5/5 approved MCP tools registered",
-      anthropicRequest: "response observed",
+      anthropicRequest: "Anthropic response observed.",
       structuredOutput: "validated",
       persistedReport: "persisted claude_agent report",
       terminalAgentStatus: "success; structured output received",
@@ -124,5 +124,38 @@ describe("live Claude smoke-test boundaries", () => {
       safeErrorMessage: "The research agent cited a product that was not collected for this job.",
     });
     expect(inspection.mcpTools).toContain("collect_products: failed (BROWSER_LAUNCH_FAILED)");
+  });
+
+  it("preserves the sanitized Anthropic rejection diagnostic in the smoke summary", () => {
+    const inspection = inspectLiveSmokeRun({
+      job: {
+        ...liveJob,
+        status: "failed",
+        errorCode: "AGENT_API_ERROR",
+        sanitizedErrorMessage:
+          "Anthropic rejected the outer Claude Agent SDK request; HTTP 400; SDK category unknown; request ID req_01Diagnostic. The SDK did not provide a safe provider error message.",
+      },
+      report: null,
+      products: [],
+      events: [
+        event("agent_sdk_initialized", "6/6 approved MCP tools registered"),
+        event(
+          "agent_api_response_observed",
+          "Anthropic API response rejected. SDK category unknown. Request ID req_01Diagnostic.",
+        ),
+        event(
+          "agent_terminal_result",
+          "success (error); terminal reason api_error; Anthropic HTTP 400; request ID req_01Diagnostic; provider message unavailable",
+        ),
+        event("agent_failed", "AGENT_API_ERROR"),
+      ],
+    });
+
+    expect(inspection).toMatchObject({
+      passed: false,
+      anthropicRequest:
+        "Anthropic API response rejected. SDK category unknown. Request ID req_01Diagnostic.",
+      failureCategory: "AGENT_API_ERROR",
+    });
   });
 });

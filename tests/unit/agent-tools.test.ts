@@ -578,6 +578,11 @@ describe("research MCP tools", () => {
       config,
       queryExecutor: async function* () {
         yield {
+          type: "assistant",
+          error: "invalid_request",
+          request_id: "req_01SanitizedDiagnostic",
+        } as unknown as SDKMessage;
+        yield {
           type: "result",
           subtype: "success",
           is_error: true,
@@ -596,13 +601,77 @@ describe("research MCP tools", () => {
     expect(result).toMatchObject({
       status: "failed",
       errorCode: "AGENT_API_ERROR",
-      sanitizedErrorMessage: "Claude returned an API error before research tools could run.",
+      sanitizedErrorMessage:
+        "Anthropic rejected the outer Claude Agent SDK request; HTTP 529; SDK category invalid_request; request ID req_01SanitizedDiagnostic. The SDK did not provide a safe provider error message.",
     });
     expect(events).toContainEqual(expect.objectContaining({
       type: "agent_terminal_result",
-      detail: "success (error); structured output missing; 1 turns; terminal reason api_error; Anthropic HTTP 529; 0.0000 USD estimated",
+      detail: "success (error); structured output missing; 1 turns; terminal reason api_error; Anthropic HTTP 529; SDK category invalid_request; request ID req_01SanitizedDiagnostic; provider message unavailable; 0.0000 USD estimated",
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "agent_api_response_observed",
+      detail:
+        "Anthropic API response rejected. SDK category invalid_request. Request ID req_01SanitizedDiagnostic.",
     }));
     expect(events.some((event) => event.detail?.includes("Raw SDK error text"))).toBe(false);
+  });
+
+  it("persists a parsed provider request error without exposing prompts or credentials", async () => {
+    const events: AgentExecutionEvent[] = [];
+    const result = await runResearchAgent({
+      request,
+      config,
+      queryExecutor: async function* () {
+        yield {
+          type: "assistant",
+          error: "invalid_request",
+          request_id: "req_01ProviderMessage",
+        } as unknown as SDKMessage;
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          terminal_reason: "api_error",
+          api_error_status: 400,
+          total_cost_usd: 0,
+          num_turns: 1,
+          result:
+            'API Error: 400 {"error":{"type":"invalid_request_error","message":"tools.2.input_schema is invalid"}}',
+        } as unknown as SDKMessage;
+      },
+      onEvent: (event) => {
+        events.push(event);
+      },
+    });
+
+    expect(result.sanitizedErrorMessage).toBe(
+      "Anthropic rejected the outer Claude Agent SDK request; HTTP 400; provider type invalid_request_error; request ID req_01ProviderMessage. tools.2.input_schema is invalid",
+    );
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "agent_terminal_result",
+      detail: expect.stringContaining("provider type invalid_request_error"),
+    }));
+
+    const unsafeResult = await runResearchAgent({
+      request,
+      config,
+      queryExecutor: async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          terminal_reason: "api_error",
+          api_error_status: 400,
+          total_cost_usd: 0,
+          num_turns: 1,
+          result:
+            'API Error: 400 {"error":{"type":"invalid_request_error","message":"system prompt content[0] was rejected: sk-secret"}}',
+        } as unknown as SDKMessage;
+      },
+    });
+
+    expect(unsafeResult.sanitizedErrorMessage).toContain("safe provider error message");
+    expect(unsafeResult.sanitizedErrorMessage).not.toContain("sk-secret");
   });
 
   it("retains an SDK terminal error category when the single-shot iterator throws afterward", async () => {
