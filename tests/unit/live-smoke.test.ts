@@ -57,6 +57,8 @@ describe("live Claude smoke-test boundaries", () => {
       agentMaxBudgetUsd: LIVE_SMOKE_LIMITS.maxBudgetUsd,
       agentTimeoutMs: LIVE_SMOKE_LIMITS.timeoutMs,
       browserMaxPagesPerRun: LIVE_SMOKE_LIMITS.maxPages,
+      webSearchMaxUses: LIVE_SMOKE_LIMITS.maxWebSearchUses,
+      webSearchMaxResults: LIVE_SMOKE_LIMITS.maxWebSearchResults,
     });
     expect(createLiveSmokeRequest()).toMatchObject({
       mode: "live",
@@ -86,7 +88,7 @@ describe("live Claude smoke-test boundaries", () => {
     expect(inspection).toMatchObject({
       passed: true,
       sdkInitialization: "5/5 approved MCP tools registered",
-      anthropicRequest: "Anthropic response observed.",
+      providerRequest: "Anthropic response observed.",
       structuredOutput: "validated",
       persistedReport: "persisted claude_agent report",
       terminalAgentStatus: "success; structured output received",
@@ -153,9 +155,20 @@ describe("live Claude smoke-test boundaries", () => {
 
     expect(inspection).toMatchObject({
       passed: false,
-      anthropicRequest:
+      providerRequest:
         "Anthropic API response rejected. SDK category unknown. Request ID req_01Diagnostic.",
       failureCategory: "AGENT_API_ERROR",
+    });
+  });
+
+  it("creates a one-candidate dynamic discovery request for the explicit OpenRouter smoke test", () => {
+    expect(createLiveSmokeRequest({ dynamicWebDiscovery: true })).toMatchObject({
+      mode: "live",
+      niche: "desk organizer",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      requestedProductCount: 1,
+      sourceIds: ["anthropic-web-discovery"],
     });
   });
 });

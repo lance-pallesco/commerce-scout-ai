@@ -224,4 +224,24 @@ describe("research job API", () => {
       error: { code: "INVALID_CONFIGURATION" },
     });
   });
+
+  it("reports a credentialed OpenRouter live runtime without requiring an Anthropic key", async () => {
+    process.env.RESEARCH_MODE = "live";
+    process.env.AI_PROVIDER = "openrouter";
+    process.env.OPENROUTER_API_KEY = "openrouter-test-key";
+    delete process.env.ANTHROPIC_API_KEY;
+
+    const sourceResponse = await getSources(
+      new Request("http://localhost/api/research-sources?niche=camping%20lantern"),
+    );
+
+    expect((await sourceResponse.json()) as unknown).toMatchObject({
+      mode: "live",
+      runtime: "claude_agent",
+      liveAgentAvailable: true,
+      sources: expect.arrayContaining([
+        expect.objectContaining({ id: "anthropic-web-discovery", searchable: true }),
+      ]),
+    });
+  });
 });

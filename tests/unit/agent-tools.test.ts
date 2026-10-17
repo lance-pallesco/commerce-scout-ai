@@ -171,6 +171,39 @@ describe("research MCP tools", () => {
     });
   });
 
+  it("reserves the full nested Web Search cost before an OpenRouter discovery request", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "camping lantern",
+      minimumPrice: 10,
+      maximumPrice: 100,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find portable camping lantern products with observed prices.",
+    });
+    const webSearchFetch = vi.fn();
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({
+        RESEARCH_MODE: "live",
+        AI_PROVIDER: "openrouter",
+        OPENROUTER_API_KEY: "openrouter-test-key",
+        AGENT_MAX_BUDGET_USD: "0.01",
+        WEB_SEARCH_MAX_USES: "2",
+      }),
+      webSearchFetch,
+    });
+    const discover = handlerFor(definitions, "discover_products");
+
+    await expect(
+      discover({ niche: "camping lantern", query: "portable lantern", limit: 2 }),
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "TOOL_ACTION_LIMIT" } },
+    });
+    expect(webSearchFetch).not.toHaveBeenCalled();
+  });
+
   it("does not snapshot candidates while a concurrent discovery call is still running", async () => {
     const liveRequest = ResearchRequestSchema.parse({
       niche: "camping lantern",
@@ -428,6 +461,54 @@ describe("research MCP tools", () => {
     );
   });
 
+  it("routes the Claude Agent SDK through OpenRouter without an Anthropic-key fallback", async () => {
+    let capturedOptions: Record<string, unknown> | undefined;
+    const openRouterConfig = getServerConfig({
+      RESEARCH_MODE: "live",
+      AI_PROVIDER: "openrouter",
+      OPENROUTER_API_KEY: "openrouter-test-key",
+      OPENROUTER_MODEL: "~anthropic/claude-sonnet-latest",
+    });
+    const result = await runResearchAgent({
+      request,
+      config: openRouterConfig,
+      queryExecutor: async function* ({ options }) {
+        capturedOptions = options as unknown as Record<string, unknown>;
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          structured_output: {
+            completion: "partial",
+            executiveSummary: "No candidates were returned by the mocked provider.",
+            limitations: ["Provider integration test."],
+            findings: [],
+          },
+        } as unknown as SDKMessage;
+      },
+      mcpServerFactory: () => ({
+        server: {} as ReturnType<typeof createResearchMcpServer>["server"],
+        getCandidates: () => [],
+      }),
+    });
+
+    expect(result.status).toBe("partial");
+    expect(capturedOptions).toMatchObject({
+      tools: [],
+      allowedTools: RESEARCH_ALLOWED_TOOLS,
+      outputFormat: { type: "json_schema" },
+      env: {
+        ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
+        ANTHROPIC_AUTH_TOKEN: "openrouter-test-key",
+        ANTHROPIC_API_KEY: "",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "~anthropic/claude-sonnet-latest",
+      },
+    });
+    expect((capturedOptions?.env as Record<string, string | undefined>).OPENROUTER_API_KEY).toBeUndefined();
+  });
+
   it("reports agent turn exhaustion accurately", async () => {
     const result = await runResearchAgent({
       request,
@@ -614,6 +695,51 @@ describe("research MCP tools", () => {
         "Anthropic API response rejected. SDK category invalid_request. Request ID req_01SanitizedDiagnostic. Provider message unavailable.",
     }));
     expect(events.some((event) => event.detail?.includes("Raw SDK error text"))).toBe(false);
+  });
+
+  it("labels OpenRouter outer Agent SDK failures without retaining raw provider output", async () => {
+    const events: AgentExecutionEvent[] = [];
+    const openRouterConfig = getServerConfig({
+      RESEARCH_MODE: "live",
+      AI_PROVIDER: "openrouter",
+      OPENROUTER_API_KEY: "openrouter-test-key",
+    });
+    const result = await runResearchAgent({
+      request,
+      config: openRouterConfig,
+      queryExecutor: async function* () {
+        yield {
+          type: "assistant",
+          error: "invalid_request",
+          request_id: "req_01OpenRouterDiagnostic",
+        } as unknown as SDKMessage;
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          terminal_reason: "api_error",
+          api_error_status: 400,
+          total_cost_usd: 0,
+          num_turns: 1,
+          result: "Raw OpenRouter response body must not be persisted.",
+        } as unknown as SDKMessage;
+      },
+      onEvent: (event) => {
+        events.push(event);
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      errorCode: "AGENT_API_ERROR",
+      sanitizedErrorMessage:
+        "OpenRouter rejected the outer Claude Agent SDK request; HTTP 400; SDK category invalid_request; request ID req_01OpenRouterDiagnostic. The SDK did not provide a safe provider error message.",
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "agent_api_response_observed",
+      detail: expect.stringContaining("OpenRouter API response rejected."),
+    }));
+    expect(events.some((event) => event.detail?.includes("Raw OpenRouter response body"))).toBe(false);
   });
 
   it("surfaces a sanitized provider usage-limit message from the SDK synthetic assistant error", async () => {

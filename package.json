@@ -14,7 +14,8 @@
     "test:browser": "vitest run tests/browser",
     "test:e2e": "playwright test",
     "worker": "tsx scripts/research-worker.ts",
-    "smoke:live": "tsx scripts/live-agent-smoke-test.ts"
+    "smoke:live": "tsx scripts/live-agent-smoke-test.ts",
+    "smoke:openrouter": "tsx scripts/live-agent-smoke-test.ts --openrouter-dynamic-web"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.302",

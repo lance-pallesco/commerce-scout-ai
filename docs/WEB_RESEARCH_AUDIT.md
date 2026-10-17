@@ -15,9 +15,10 @@ and a per-request `max_uses` limit for both tools:
 The Agent SDK capability is not sufficient for the primary agent to enable
 those tools directly, so the implementation keeps the agent's tool surface
 MCP-only and exposes a bounded `discover_products` MCP tool. That tool makes a
-separate Messages API request using the same `ANTHROPIC_API_KEY`, requests
-Anthropic's `web_search_20250305` server tool with a maximum of two searches,
-and validates every returned URL before creating candidates.
+separate Messages API request using the selected provider credential, requests
+Anthropic's `web_search_20250305` server tool in direct mode or OpenRouter's
+`openrouter:web_search` server tool in OpenRouter mode, has a maximum of two
+searches, and validates every returned URL before creating candidates.
 
 Direct Agent SDK WebSearch/WebFetch remain disabled because:
 
@@ -81,7 +82,10 @@ Web Search result from arriving after job finalization. The search-use charge
 and response token estimate are added to the Agent SDK estimate when Anthropic
 returns usage metadata. A transport timeout cannot expose final server usage,
 so it remains an explicitly uncertain cost outcome rather than a claim of zero
-cost. The Agent SDK budget and the direct Web Search budget are independently
+cost. In OpenRouter mode the fixed Exa Web Search cost is conservatively
+reserved before the request from its bounded maximum result count; model-token
+cost continues to be reported only when the Agent SDK exposes it. The Agent
+SDK budget and the direct Web Search budget are independently
 enforced; this local MVP does not yet have a provider-wide, in-flight aggregate
 spend ledger. The two-search cap, output-token cap, timeout, and per-lane
 budget still bound the request surface, but a production deployment should add

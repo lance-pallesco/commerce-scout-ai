@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Database, SqlValue } from "sql.js";
 
-import { assertLiveResearchAvailable, type ServerConfig } from "@/lib/config/env";
+import {
+  assertLiveResearchAvailable,
+  routedAgentModel,
+  type ServerConfig,
+} from "@/lib/config/env";
 import type { AgentResearchReport } from "@/lib/agent/contracts";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
 import { ProductEvaluationSchema, type ProductEvaluation } from "@/lib/scoring/score-product";
@@ -138,7 +142,7 @@ export async function createResearchJob(
     cancellationRequestedAt: null,
     errorCode: null,
     sanitizedErrorMessage: null,
-    agentModel: config.agentModel,
+    agentModel: routedAgentModel(config),
     maximumTurns: config.agentMaxTurns,
     estimatedCostUsd: 0,
     elapsedTimeMs: 0,

@@ -7,6 +7,8 @@ import {
 
 import {
   assertLiveResearchAvailable,
+  createAgentSdkEnvironment,
+  routedAgentModel,
   type ServerConfig,
 } from "@/lib/config/env";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
@@ -27,7 +29,7 @@ import {
 
 export const RESEARCH_AGENT_SYSTEM_PROMPT = `You are CommerceScout AI's product research agent. Your job is to create a careful, evidence-grounded research brief.
 
-You may use only the provided CommerceScout MCP research tools. You do not have permission to browse arbitrary URLs, execute shell commands, access files, alter data, or use tools outside this server. Use discover_products first for a free-form live niche when the dynamic discovery source is approved; the backend performs the bounded Anthropic Web Search request and validates all returned URLs.
+You may use only the provided CommerceScout MCP research tools. You do not have permission to browse arbitrary URLs, execute shell commands, access files, alter data, or use tools outside this server. Use discover_products first for a free-form live niche when the dynamic discovery source is approved; the backend performs the configured provider's bounded Web Search request and validates all returned URLs.
 
 Workflow: first read the research criteria and source list, then choose the dynamic discovery tool for a niche that is not tied to a fixed catalog. Formulate a concise objective-derived search phrase, call discover_products, and use the returned observed evidence. You may use a registered searchable adapter as a bounded fallback, then inspect candidates as needed and produce the requested structured report. Stop collecting when the requested product count has enough available evidence. If no approved source returns matching products, return a partial report and state the limitation; never substitute an unrelated category.
 
@@ -107,6 +109,10 @@ type ApiFailureDiagnostic = Readonly<{
   providerErrorType?: string;
   providerMessage?: string;
 }>;
+
+function apiProviderName(config: ServerConfig): "Anthropic" | "OpenRouter" {
+  return config.aiProvider === "openrouter" ? "OpenRouter" : "Anthropic";
+}
 
 const REQUEST_ID_PATTERN = /^req_[A-Za-z0-9_-]+$/;
 const PROVIDER_ERROR_TYPE_PATTERN = /^[a-z][a-z0-9_]{0,79}$/;
@@ -189,9 +195,10 @@ function withTerminalProviderDiagnostic(
 
 function apiFailureDescription(
   result: SDKResultMessage,
+  config: ServerConfig,
   diagnostic?: ApiFailureDiagnostic,
 ): string {
-  const details = ["Anthropic rejected the outer Claude Agent SDK request"];
+  const details = [`${apiProviderName(config)} rejected the outer Claude Agent SDK request`];
   if (result.subtype === "success" && typeof result.api_error_status === "number") {
     details.push(`HTTP ${result.api_error_status}`);
   }
@@ -215,6 +222,7 @@ function userPrompt(request: ResearchRequest): string {
 
 function classifyResult(
   result: SDKResultMessage,
+  config: ServerConfig,
   apiFailureDiagnostic?: ApiFailureDiagnostic,
 ): AgentExecutionError | null {
   if (result.subtype === "success" && !result.is_error) return null;
@@ -222,7 +230,11 @@ function classifyResult(
     if (result.terminal_reason === "api_error") {
       return new AgentExecutionError(
         "AGENT_API_ERROR",
-        apiFailureDescription(result, withTerminalProviderDiagnostic(result, apiFailureDiagnostic)),
+        apiFailureDescription(
+          result,
+          config,
+          withTerminalProviderDiagnostic(result, apiFailureDiagnostic),
+        ),
       );
     }
     if (result.terminal_reason === "model_error") {
@@ -285,6 +297,7 @@ function validateReport(
 
 function terminalResultDetails(
   result: SDKResultMessage,
+  config: ServerConfig,
   apiFailureDiagnostic?: ApiFailureDiagnostic,
 ): string[] {
   const details = [
@@ -302,7 +315,7 @@ function terminalResultDetails(
     result.api_error_status >= 100 &&
     result.api_error_status <= 599
   ) {
-    details.push(`Anthropic HTTP ${result.api_error_status}`);
+    details.push(`${apiProviderName(config)} HTTP ${result.api_error_status}`);
   }
   if (result.subtype === "success" && result.terminal_reason === "api_error") {
     const diagnostic = withTerminalProviderDiagnostic(result, apiFailureDiagnostic);
@@ -412,7 +425,7 @@ export async function runResearchAgent(
     await emit({
       type: "agent_started",
       at: new Date().toISOString(),
-      detail: "Bounded dynamic web discovery MCP tool enabled.",
+      detail: `Bounded dynamic web discovery MCP tool enabled via ${apiProviderName(options.config)}.`,
     });
     mcp = (options.mcpServerFactory ?? createResearchMcpServer)({
       request: options.request,
@@ -429,7 +442,8 @@ export async function runResearchAgent(
       prompt: userPrompt(options.request),
       options: {
         abortController,
-        model: options.config.agentModel,
+        env: createAgentSdkEnvironment(options.config),
+        model: routedAgentModel(options.config),
         maxTurns: options.config.agentMaxTurns,
         maxBudgetUsd: options.config.agentMaxBudgetUsd,
         systemPrompt: RESEARCH_AGENT_SYSTEM_PROMPT,
@@ -473,7 +487,7 @@ export async function runResearchAgent(
           at: new Date().toISOString(),
           detail: message.error
             ? [
-                "Anthropic API response rejected.",
+                `${apiProviderName(options.config)} API response rejected.`,
                 `SDK category ${message.error}.`,
                 apiFailureDiagnostic?.requestId
                   ? `Request ID ${apiFailureDiagnostic.requestId}.`
@@ -482,7 +496,7 @@ export async function runResearchAgent(
                   ? `Provider message ${apiFailureDiagnostic.providerMessage}`
                   : "Provider message unavailable.",
               ].join(" ")
-            : "Anthropic response observed.",
+            : `${apiProviderName(options.config)} response observed.`,
         });
       }
       if (message.type === "result") {
@@ -492,7 +506,7 @@ export async function runResearchAgent(
         await emit({
           type: "agent_terminal_result",
           at: new Date().toISOString(),
-          detail: terminalResultDetails(message, apiFailureDiagnostic).join("; "),
+          detail: terminalResultDetails(message, options.config, apiFailureDiagnostic).join("; "),
         });
         if (hasStructuredOutput) {
           await emit({ type: "agent_structured_output_received", at: new Date().toISOString() });
@@ -509,7 +523,7 @@ export async function runResearchAgent(
         "The research agent ended without a final result.",
       );
     }
-    const resultError = classifyResult(finalResult, apiFailureDiagnostic);
+    const resultError = classifyResult(finalResult, options.config, apiFailureDiagnostic);
     if (resultError) throw resultError;
     // The SDK may dispatch independent MCP calls in one assistant turn. Never
     // snapshot candidates or cost while a bounded evidence operation is still
@@ -539,7 +553,7 @@ export async function runResearchAgent(
       abortController.signal.aborted
         ? interruptionError()
         : finalResult
-          ? (classifyResult(finalResult, apiFailureDiagnostic) ?? error)
+          ? (classifyResult(finalResult, options.config, apiFailureDiagnostic) ?? error)
           : error,
       collectedCandidates,
       startedAt,

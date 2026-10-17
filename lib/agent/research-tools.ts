@@ -14,6 +14,7 @@ import { deduplicateProducts } from "@/lib/research/normalize";
 import { listResearchSources } from "@/lib/research/source-registry";
 import {
   discoverProductsWithWebSearch,
+  estimatedWebSearchCostPerUse,
   WebDiscoveryError,
   type WebSearchFetch,
 } from "@/lib/research/web-discovery";
@@ -333,7 +334,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
 
   const discoverProductsTool = tool(
     "discover_products",
-    "Search the live web for product candidates using the bounded Anthropic Web Search capability. Search-result URLs are untrusted evidence and are validated by the backend before they are returned.",
+    "Search the live web for product candidates using the configured provider's bounded Web Search capability. Search-result URLs are untrusted evidence and are validated by the backend before they are returned.",
     {
       niche: z.string().trim().min(2).max(80).describe("The approved research niche"),
       query: z.string().trim().min(2).max(120).describe("A focused product-search phrase"),
@@ -363,14 +364,31 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             "The bounded Web Search request limit for this job has been reached.",
           );
         }
-        if (state.webSearchCostUsd + 0.01 > state.config.agentMaxBudgetUsd) {
+        const maximumSearchResults = Math.min(
+          input.limit,
+          state.request.requestedProductCount,
+          state.config.webSearchMaxResults,
+        );
+        // One MCP invocation can authorize every remaining provider search
+        // use. Reserve their full worst-case server-tool cost before starting
+        // the network call, rather than only the first use.
+        const maximumWebSearchCost = remainingSearchUses * estimatedWebSearchCostPerUse(
+          state.config,
+          maximumSearchResults,
+        );
+        if (state.webSearchCostUsd + maximumWebSearchCost > state.config.agentMaxBudgetUsd) {
           throw new AgentToolGuardrailError(
             "TOOL_ACTION_LIMIT",
             "The bounded Web Search request would exceed the configured research budget.",
           );
         }
         fingerprintAction(state, toolName, input);
-        await recordEvent(state, "tool_started", toolName, "Anthropic Web Search request started");
+        await recordEvent(
+          state,
+          "tool_started",
+          toolName,
+          `${state.config.aiProvider === "openrouter" ? "OpenRouter" : "Anthropic"} Web Search request started`,
+        );
         state.webDiscoveryAttempted = true;
         // Reserve the remaining bounded uses before awaiting the network call.
         // Claude may issue parallel MCP calls; reserving here prevents those

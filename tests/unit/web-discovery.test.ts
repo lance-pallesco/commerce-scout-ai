@@ -12,6 +12,16 @@ const config = getServerConfig({
   WEB_SEARCH_MAX_TOKENS: "1200",
 });
 
+const openRouterConfig = getServerConfig({
+  RESEARCH_MODE: "live",
+  AI_PROVIDER: "openrouter",
+  OPENROUTER_API_KEY: "openrouter-test-key",
+  OPENROUTER_MODEL: "~anthropic/claude-sonnet-latest",
+  WEB_SEARCH_MAX_USES: "2",
+  WEB_SEARCH_MAX_RESULTS: "10",
+  WEB_SEARCH_MAX_TOKENS: "1200",
+});
+
 function response(
   content: unknown,
   usage: Readonly<{
@@ -88,6 +98,58 @@ describe("Anthropic web discovery", () => {
     });
   });
 
+  it("uses OpenRouter's bounded server Web Search without sending an Anthropic credential", async () => {
+    let requestUrl = "";
+    let requestHeaders: Headers | undefined;
+    let requestBody: Record<string, unknown> | undefined;
+    const result = await discoverProductsWithWebSearch({
+      niche: "skincare",
+      query: "gentle face serum",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      limit: 3,
+      config: openRouterConfig,
+      fetchImpl: async (url, init) => {
+        requestUrl = String(url);
+        requestHeaders = new Headers(init?.headers);
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return response([
+          {
+            type: "web_search_tool_result",
+            search_count: 1,
+            content: [{
+              type: "web_search_result",
+              title: "Hydrating Skincare Face Serum",
+              url: "https://products.example.com/serum",
+              snippet: "A gentle daily serum. Price $24.99.",
+            }],
+          },
+        ]);
+      },
+      resolveAddresses: async () => ["93.184.216.34"],
+    });
+
+    expect(result.products).toHaveLength(1);
+    expect(requestUrl).toBe("https://openrouter.ai/api/v1/messages");
+    expect(requestHeaders?.get("authorization")).toBe("Bearer openrouter-test-key");
+    expect(requestHeaders?.get("x-api-key")).toBeNull();
+    expect(requestHeaders?.get("anthropic-version")).toBeNull();
+    expect(requestBody).toMatchObject({
+      model: "~anthropic/claude-sonnet-latest",
+      max_tool_calls: 2,
+      tools: [{
+        type: "openrouter:web_search",
+        parameters: {
+          engine: "exa",
+          max_uses: 2,
+          max_results: 3,
+          max_total_results: 6,
+        },
+      }],
+    });
+    expect(result.estimatedCostUsd).toBe(0.007);
+  });
+
   it("classifies safe HTTP failures without retaining response bodies", async () => {
     await expect(
       discoverProductsWithWebSearch({
@@ -106,6 +168,27 @@ describe("Anthropic web discovery", () => {
       code: "WEB_SEARCH_PERMISSION_DENIED",
       message: expect.stringContaining("HTTP 403"),
       httpStatus: 403,
+    });
+  });
+
+  it("reports an OpenRouter authentication failure without retaining its response body", async () => {
+    await expect(
+      discoverProductsWithWebSearch({
+        niche: "beauty",
+        query: "lip balm",
+        minimumPrice: 5,
+        maximumPrice: 40,
+        limit: 2,
+        config: openRouterConfig,
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ error: { message: "credential must never be persisted" } }), {
+            status: 401,
+          }),
+      }),
+    ).rejects.toMatchObject({
+      code: "WEB_SEARCH_AUTHENTICATION_FAILED",
+      message: "OpenRouter rejected the Web Search credential (HTTP 401). Check OPENROUTER_API_KEY.",
+      httpStatus: 401,
     });
   });
 

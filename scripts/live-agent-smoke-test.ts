@@ -27,7 +27,7 @@ function printInspection(inspection: LiveSmokeInspection): void {
   console.log(`Job ID: ${inspection.jobId}`);
   console.log(`Runtime mode: ${inspection.runtimeMode}`);
   console.log(`SDK initialization: ${inspection.sdkInitialization}`);
-  console.log(`Anthropic request: ${inspection.anthropicRequest}`);
+  console.log(`Provider request: ${inspection.providerRequest}`);
   console.log(`MCP tools: ${inspection.mcpTools.length ? inspection.mcpTools.join("; ") : "none observed"}`);
   console.log(`Products collected: ${inspection.productsCollected}`);
   console.log(`Structured output: ${inspection.structuredOutput}`);
@@ -47,8 +47,16 @@ async function main() {
   loadEnvConfig(process.cwd());
 
   const baseConfig = getServerConfig();
+  const openRouterDynamicSmoke = process.argv.includes("--openrouter-dynamic-web");
   if (baseConfig.researchMode !== "live") {
     console.error("Live smoke test not run: set RESEARCH_MODE=live in .env.local first.");
+    process.exitCode = 2;
+    return;
+  }
+  if (openRouterDynamicSmoke && baseConfig.aiProvider !== "openrouter") {
+    console.error(
+      "OpenRouter live smoke test not run: set AI_PROVIDER=openrouter before using --openrouter-dynamic-web.",
+    );
     process.exitCode = 2;
     return;
   }
@@ -61,7 +69,10 @@ async function main() {
       throw new Error("Live smoke test refused: wait for existing pending or running jobs to finish.");
     }
 
-    const job = await createResearchJob(createLiveSmokeRequest(), config);
+    const job = await createResearchJob(
+      createLiveSmokeRequest({ dynamicWebDiscovery: openRouterDynamicSmoke }),
+      config,
+    );
     const workerResult = await runResearchWorkerOnce(config, "live-agent-smoke-test");
 
     const [completedJob, report, products, events] = await Promise.all([
@@ -90,7 +101,7 @@ async function main() {
     }
 
     console.log("Live Claude smoke test succeeded.");
-    console.log(`Boundaries: <=${LIVE_SMOKE_LIMITS.maxTurns} turns, <=$${LIVE_SMOKE_LIMITS.maxBudgetUsd.toFixed(2)} budget, <=${LIVE_SMOKE_LIMITS.timeoutMs / 1_000}s timeout, ${LIVE_SMOKE_LIMITS.maxPages} browser page.`);
+    console.log(`Boundaries: <=${LIVE_SMOKE_LIMITS.maxTurns} turns, <=$${LIVE_SMOKE_LIMITS.maxBudgetUsd.toFixed(2)} budget, <=${LIVE_SMOKE_LIMITS.timeoutMs / 1_000}s timeout, ${LIVE_SMOKE_LIMITS.maxPages} browser page, <=${LIVE_SMOKE_LIMITS.maxWebSearchUses} Web Search request.`);
   } catch (error) {
     const message = error instanceof Error ? error.message.replace(/[\r\n]+/g, " ") : "Unknown smoke-test failure.";
     console.error(`Live smoke test did not succeed: ${message}`);

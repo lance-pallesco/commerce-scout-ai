@@ -26,8 +26,26 @@ const booleanSetting = (fallback: boolean) =>
     z.boolean().default(fallback),
   );
 
+export const OPENROUTER_ANTHROPIC_BASE_URL = "https://openrouter.ai/api";
+
+const openRouterModel = z
+  .string()
+  .trim()
+  .min(1)
+  .max(160)
+  .regex(/^[~a-zA-Z0-9._:/\-[\]]+$/);
+
 const ServerConfigSchema = z.object({
   ANTHROPIC_API_KEY: z.preprocess(blankToUndefined, z.string().min(1).optional()),
+  AI_PROVIDER: z.preprocess(
+    blankToUndefined,
+    z.enum(["anthropic", "openrouter"]).default("anthropic"),
+  ),
+  OPENROUTER_API_KEY: z.preprocess(blankToUndefined, z.string().min(1).optional()),
+  OPENROUTER_MODEL: z.preprocess(
+    blankToUndefined,
+    openRouterModel.default("~anthropic/claude-sonnet-latest"),
+  ),
   RESEARCH_MODE: z.preprocess(
     blankToUndefined,
     z.enum(["fixtures", "live"]).default("fixtures"),
@@ -60,8 +78,12 @@ const ServerConfigSchema = z.object({
 });
 
 export type ResearchMode = z.infer<typeof ServerConfigSchema>["RESEARCH_MODE"];
+export type AiProvider = z.infer<typeof ServerConfigSchema>["AI_PROVIDER"];
 export type ServerConfig = Readonly<{
   anthropicApiKey?: string;
+  aiProvider: AiProvider;
+  openRouterApiKey?: string;
+  openRouterModel: string;
   researchMode: ResearchMode;
   agentModel: string;
   agentMaxTurns: number;
@@ -90,6 +112,16 @@ export class ConfigurationError extends Error {
   }
 }
 
+export function hasLiveProviderCredential(config: ServerConfig): boolean {
+  return config.aiProvider === "openrouter"
+    ? Boolean(config.openRouterApiKey)
+    : Boolean(config.anthropicApiKey);
+}
+
+export function routedAgentModel(config: ServerConfig): string {
+  return config.aiProvider === "openrouter" ? config.openRouterModel : config.agentModel;
+}
+
 export function getServerConfig(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): ServerConfig {
@@ -106,6 +138,9 @@ export function getServerConfig(
   const config = parsed.data;
   return Object.freeze({
     anthropicApiKey: config.ANTHROPIC_API_KEY,
+    aiProvider: config.AI_PROVIDER,
+    openRouterApiKey: config.OPENROUTER_API_KEY,
+    openRouterModel: config.OPENROUTER_MODEL,
     researchMode: config.RESEARCH_MODE,
     agentModel: config.AGENT_MODEL,
     agentMaxTurns: config.AGENT_MAX_TURNS,
@@ -129,9 +164,59 @@ export function getServerConfig(
 export function assertLiveResearchAvailable(config: ServerConfig): void {
   if (config.researchMode !== "live") return;
 
-  if (!config.anthropicApiKey) {
+  if (config.aiProvider === "openrouter") {
+    if (!hasLiveProviderCredential(config)) {
+      throw new ConfigurationError(
+        "OPENROUTER_API_KEY is required when RESEARCH_MODE is live and AI_PROVIDER is openrouter.",
+      );
+    }
+    return;
+  }
+
+  if (!hasLiveProviderCredential(config)) {
     throw new ConfigurationError(
       "ANTHROPIC_API_KEY is required when RESEARCH_MODE is live.",
     );
   }
+}
+
+const CLAUDE_MODEL_ENVIRONMENT_KEYS = [
+  "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+] as const;
+
+/**
+ * Creates the complete child-process environment for the Agent SDK runtime.
+ * The explicit provider branch prevents an inherited credential or gateway URL
+ * from silently changing billing providers.
+ */
+export function createAgentSdkEnvironment(
+  config: ServerConfig,
+  inheritedEnvironment: Readonly<Record<string, string | undefined>> = process.env,
+): Record<string, string | undefined> {
+  const environment: Record<string, string | undefined> = { ...inheritedEnvironment };
+  delete environment.OPENROUTER_API_KEY;
+
+  if (config.aiProvider === "openrouter") {
+    environment.ANTHROPIC_BASE_URL = OPENROUTER_ANTHROPIC_BASE_URL;
+    environment.ANTHROPIC_AUTH_TOKEN = config.openRouterApiKey;
+    // Claude Code treats this as a direct-Anthropic credential. It must be
+    // blank so a selected OpenRouter run cannot fall back to Anthropic billing.
+    environment.ANTHROPIC_API_KEY = "";
+    for (const key of CLAUDE_MODEL_ENVIRONMENT_KEYS) {
+      environment[key] = config.openRouterModel;
+    }
+    return environment;
+  }
+
+  delete environment.ANTHROPIC_BASE_URL;
+  delete environment.ANTHROPIC_AUTH_TOKEN;
+  for (const key of CLAUDE_MODEL_ENVIRONMENT_KEYS) {
+    delete environment[key];
+  }
+  environment.ANTHROPIC_API_KEY = config.anthropicApiKey;
+  return environment;
 }

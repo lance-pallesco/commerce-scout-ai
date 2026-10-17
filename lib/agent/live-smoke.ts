@@ -9,6 +9,8 @@ export const LIVE_SMOKE_LIMITS = Object.freeze({
   maxBudgetUsd: 0.1,
   timeoutMs: 90_000,
   maxPages: 1,
+  maxWebSearchUses: 1,
+  maxWebSearchResults: 3,
 });
 
 type SmokeReport = Readonly<{ report: unknown }> | null;
@@ -18,7 +20,7 @@ export type LiveSmokeInspection = Readonly<{
   jobId: string;
   runtimeMode: ResearchJob["request"]["mode"];
   sdkInitialization: string;
-  anthropicRequest: string;
+  providerRequest: string;
   mcpTools: readonly string[];
   productsCollected: number;
   structuredOutput: string;
@@ -113,7 +115,7 @@ export function inspectLiveSmokeRun(input: Readonly<{
     jobId: job.id,
     runtimeMode: job.request.mode,
     sdkInitialization: initialized?.detail ?? "not observed",
-    anthropicRequest: apiResponse?.detail
+    providerRequest: apiResponse?.detail
       ? apiResponse.detail
       : apiResponse
         ? "response observed"
@@ -143,10 +145,30 @@ export function createLiveSmokeConfig(config: ServerConfig): ServerConfig {
     agentMaxBudgetUsd: Math.min(config.agentMaxBudgetUsd, LIVE_SMOKE_LIMITS.maxBudgetUsd),
     agentTimeoutMs: Math.min(config.agentTimeoutMs, LIVE_SMOKE_LIMITS.timeoutMs),
     browserMaxPagesPerRun: Math.min(config.browserMaxPagesPerRun, LIVE_SMOKE_LIMITS.maxPages),
+    webSearchMaxUses: Math.min(config.webSearchMaxUses, LIVE_SMOKE_LIMITS.maxWebSearchUses),
+    webSearchMaxResults: Math.min(
+      config.webSearchMaxResults,
+      LIVE_SMOKE_LIMITS.maxWebSearchResults,
+    ),
   });
 }
 
-export function createLiveSmokeRequest(): ResearchRequest {
+export function createLiveSmokeRequest(
+  options: Readonly<{ dynamicWebDiscovery?: boolean }> = {},
+): ResearchRequest {
+  if (options.dynamicWebDiscovery) {
+    return ResearchRequestSchema.parse({
+      niche: "desk organizer",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      requestedProductCount: 1,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective:
+        "Produce one evidence-grounded discovery lead using the bounded configured-provider Web Search tool.",
+    });
+  }
+
   return ResearchRequestSchema.parse({
     niche: "electronics",
     minimumPrice: 1,

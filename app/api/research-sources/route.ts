@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { apiException } from "@/lib/api/response";
-import { getServerConfig } from "@/lib/config/env";
+import { getServerConfig, hasLiveProviderCredential } from "@/lib/config/env";
 import {
   listCompatibleResearchSources,
   listResearchSources,
@@ -26,7 +26,7 @@ export async function GET(request: Request) {
       supportedNiches.push("searchable product discovery");
     }
     const liveAgentAvailable =
-      config.researchMode === "live" && Boolean(config.anthropicApiKey);
+      config.researchMode === "live" && hasLiveProviderCredential(config);
     return NextResponse.json({
       mode: config.researchMode,
       runtime: config.researchMode === "fixtures"
