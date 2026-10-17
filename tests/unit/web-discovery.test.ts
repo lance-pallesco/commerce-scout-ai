@@ -36,6 +36,28 @@ function response(
   });
 }
 
+function openRouterCitationResponse(
+  annotations: unknown,
+  usage: Readonly<{
+    input_tokens: number;
+    output_tokens: number;
+    server_tool_use: Readonly<{ web_search_requests: number }>;
+  }> = {
+    input_tokens: 100,
+    output_tokens: 50,
+    server_tool_use: { web_search_requests: 1 },
+  },
+): Response {
+  return new Response(JSON.stringify({
+    content: [{ type: "text", text: "Provider-generated answer with citations." }],
+    annotations,
+    usage,
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 describe("Anthropic web discovery", () => {
   it("converts observable priced search results into niche-matched candidates", async () => {
     let requestBody: Record<string, unknown> | undefined;
@@ -113,16 +135,14 @@ describe("Anthropic web discovery", () => {
         requestUrl = String(url);
         requestHeaders = new Headers(init?.headers);
         requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return response([
+        return openRouterCitationResponse([
           {
-            type: "web_search_tool_result",
-            search_count: 1,
-            content: [{
-              type: "web_search_result",
+            type: "url_citation",
+            url_citation: {
               title: "Hydrating Skincare Face Serum",
               url: "https://products.example.com/serum",
-              snippet: "A gentle daily serum. Price $24.99.",
-            }],
+              content: "A gentle daily serum with an observed price of $24.99.",
+            },
           },
         ]);
       },
@@ -144,10 +164,50 @@ describe("Anthropic web discovery", () => {
           max_uses: 2,
           max_results: 3,
           max_total_results: 6,
+          max_characters: 2_000,
         },
       }],
     });
     expect(result.estimatedCostUsd).toBe(0.007);
+  });
+
+  it("accepts OpenRouter citations returned through a Chat Completions compatibility envelope", async () => {
+    const result = await discoverProductsWithWebSearch({
+      niche: "skincare",
+      query: "gentle face serum",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      limit: 3,
+      config: openRouterConfig,
+      fetchImpl: async () => new Response(JSON.stringify({
+        content: [{ type: "text", text: "Do not use this generated answer as evidence." }],
+        choices: [{
+          message: {
+            annotations: [{
+              type: "url_citation",
+              url_citation: {
+                title: "Skincare Face Serum",
+                url: "https://products.example.com/chat-envelope-serum",
+                content: "Skincare serum, observed price $29.00.",
+              },
+            }],
+          },
+        }],
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          server_tool_use: { web_search_requests: 1 },
+        },
+      }), { status: 200 }),
+      resolveAddresses: async () => ["93.184.216.34"],
+    });
+
+    expect(result.products).toHaveLength(1);
+    expect(result.products[0]).toMatchObject({
+      name: "Skincare Face Serum",
+      price: 29,
+      sourceUrl: "https://products.example.com/chat-envelope-serum",
+    });
   });
 
   it("classifies safe HTTP failures without retaining response bodies", async () => {
@@ -248,8 +308,8 @@ describe("Anthropic web discovery", () => {
     expect(result.estimatedCostUsd).toBeGreaterThanOrEqual(0.02);
   });
 
-  it("rejects private and non-HTTPS result URLs without trusting fabricated evidence", async () => {
-    const result = await discoverProductsWithWebSearch({
+  it("reports rejected private and non-HTTPS result URLs without trusting fabricated evidence", async () => {
+    await expect(discoverProductsWithWebSearch({
       niche: "camping lantern",
       query: "portable lantern",
       minimumPrice: 10,
@@ -272,14 +332,14 @@ describe("Anthropic web discovery", () => {
           },
         ]),
       resolveAddresses: async () => ["127.0.0.1"],
+    })).rejects.toMatchObject({
+      code: "WEB_SEARCH_NO_RESULTS",
+      diagnostics: expect.objectContaining({ rejectedUrlCount: 1, validCandidateCount: 0 }),
     });
-
-    expect(result.products).toEqual([]);
-    expect(result.rejectedUrlCount).toBe(1);
   });
 
-  it("does not accept a generic modifier as proof of a multi-term niche", async () => {
-    const result = await discoverProductsWithWebSearch({
+  it("reports a niche mismatch instead of accepting a generic modifier as proof", async () => {
+    await expect(discoverProductsWithWebSearch({
       niche: "wireless earbuds",
       query: "affordable wireless earbuds",
       minimumPrice: 10,
@@ -302,9 +362,36 @@ describe("Anthropic web discovery", () => {
           },
         ]),
       resolveAddresses: async () => ["93.184.216.34"],
+    })).rejects.toMatchObject({
+      code: "WEB_SEARCH_NO_RESULTS",
+      diagnostics: expect.objectContaining({ nicheMismatchCount: 1, validCandidateCount: 0 }),
     });
+  });
 
-    expect(result.products).toEqual([]);
+  it("reports observable result counts and rejection reasons when citations lack a usable price", async () => {
+    await expect(discoverProductsWithWebSearch({
+      niche: "skincare",
+      query: "gentle face serum",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      limit: 2,
+      config: openRouterConfig,
+      fetchImpl: async () => openRouterCitationResponse([
+        {
+          type: "url_citation",
+          url_citation: {
+            title: "Gentle Skincare Face Serum",
+            url: "https://products.example.com/no-price-serum",
+            content: "A gentle daily face serum with no price in this observed excerpt.",
+          },
+        },
+      ]),
+      resolveAddresses: async () => ["93.184.216.34"],
+    })).rejects.toMatchObject({
+      code: "WEB_SEARCH_NO_RESULTS",
+      message: expect.stringContaining("Search hits: 1; validated candidates: 0; rejected: 1"),
+      diagnostics: expect.objectContaining({ missingPriceCount: 1 }),
+    });
   });
 
   it("fails closed when the search response has no usable results", async () => {

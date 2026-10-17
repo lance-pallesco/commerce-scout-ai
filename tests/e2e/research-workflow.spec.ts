@@ -38,6 +38,22 @@ test("submits a fixture job and displays persisted rankings", async ({ page }, t
   await page.screenshot({ path: testInfo.outputPath("populated-dashboard.png"), fullPage: true });
 });
 
+test("explains a persisted zero-result partial run without showing a ranking", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await page.getByLabel("Minimum price").fill("500");
+  await page.getByLabel("Maximum price").fill("600");
+  await page.getByRole("button", { name: "Start research" }).click();
+
+  await runResearchWorkerOnce(getServerConfig(), "playwright-empty-worker");
+  await page.reload();
+  await page.getByRole("button", { name: /skincare.*Claude-selected approved source/i }).first().click();
+
+  await expect(page.getByText("No product evidence was retained for this request")).toBeVisible();
+  await expect(page.getByText("No ranking or opportunity score was created.")).toBeVisible();
+  await expect(page.getByText("Product ranking")).not.toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("zero-result-dashboard.png"), fullPage: true });
+});
+
 test("keeps the research form usable on a narrow viewport", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");

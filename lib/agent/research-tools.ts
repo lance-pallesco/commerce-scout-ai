@@ -273,20 +273,31 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             "The requested niche does not match this research job.",
           );
         }
-        if (
+        const requiresDynamicDiscoveryFirst =
           state.request.mode === "live" &&
           state.request.sourceIds.includes("anthropic-web-discovery") &&
-          input.sourceId !== "anthropic-web-discovery" &&
-          !state.webDiscoveryAttempted
-        ) {
+          input.sourceId !== "anthropic-web-discovery";
+        if (requiresDynamicDiscoveryFirst && !state.webDiscoveryAttempted) {
           throw new AgentToolGuardrailError(
             "SOURCE_NOT_APPROVED",
             "Attempt discover_products before using a catalog fallback for this live research job.",
           );
         }
+        if (requiresDynamicDiscoveryFirst) {
+          // The SDK can dispatch MCP calls close together. Do not announce or
+          // start a catalog fallback until the dynamic operation has settled;
+          // otherwise the timeline falsely attributes that wait to browser
+          // collection and an already-sufficient discovery can waste a turn.
+          await waitForEvidenceOperations(state);
+          if (state.candidates.length >= state.request.requestedProductCount) {
+            throw new AgentToolGuardrailError(
+              "TOOL_NO_PROGRESS",
+              "Dynamic discovery already returned enough matching candidates; do not collect an unnecessary catalog fallback.",
+            );
+          }
+        }
         fingerprintAction(state, toolName, input);
         await recordEvent(state, "tool_started", toolName, `sourceId=${input.sourceId}`);
-        await waitForEvidenceOperations(state);
         const candidateCountBeforeCollection = state.candidates.length;
         const finishEvidenceOperation = beginEvidenceOperation(state);
         let result: Awaited<ReturnType<typeof collectProducts>>;
@@ -440,7 +451,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
           state,
           "tool_completed",
           toolName,
-          `${result.searchUses} search request${result.searchUses === 1 ? "" : "s"}; ${result.products.length} products collected; ${result.rejectedUrlCount} URLs rejected; ${result.estimatedCostUsd.toFixed(4)} USD estimated`,
+          `${result.searchUses} search request${result.searchUses === 1 ? "" : "s"}; ${result.diagnostics.searchHitCount} search hits; ${result.products.length} validated products; ${result.diagnostics.rejectedRecordCount} records rejected; ${result.rejectedUrlCount} URLs rejected; ${result.estimatedCostUsd.toFixed(4)} USD estimated`,
         );
         return toolSuccess({
           products: result.products,
@@ -450,6 +461,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             observedUrlCount: result.observedUrlCount,
             rejectedUrlCount: result.rejectedUrlCount,
             estimatedCostUsd: result.estimatedCostUsd,
+            diagnostics: result.diagnostics,
           },
           collectionStatus: "completed" as const,
         });

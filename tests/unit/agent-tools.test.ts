@@ -129,6 +129,61 @@ describe("research MCP tools", () => {
     });
   });
 
+  it("does not spend a browser fallback when dynamic discovery already has enough evidence", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "skincare",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery", "target-public-skincare"],
+      mode: "live",
+      objective: "Find skincare products with observed prices for further review.",
+    });
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+      webSearchFetch: async () => new Response(JSON.stringify({
+        content: [{
+          type: "web_search_tool_result",
+          search_count: 1,
+          content: [
+            {
+              type: "web_search_result",
+              title: "Hydrating Skincare Serum",
+              url: "https://products.example.com/serum",
+              snippet: "Hydrating skincare serum. Price $24.99.",
+            },
+            {
+              type: "web_search_result",
+              title: "Gentle Skincare Cleanser",
+              url: "https://products.example.com/cleanser",
+              snippet: "Gentle skincare cleanser. Price $19.99.",
+            },
+          ],
+        }],
+        usage: { input_tokens: 10, output_tokens: 10 },
+      }), { status: 200 }),
+      webSearchResolveAddresses: async () => ["93.184.216.34"],
+    });
+    const discover = handlerFor(definitions, "discover_products");
+    const collect = handlerFor(definitions, "collect_products");
+
+    await expect(
+      discover({ niche: "skincare", query: "hydrating serum and gentle cleanser", limit: 2 }),
+    ).resolves.not.toHaveProperty("isError");
+    await expect(
+      collect({ sourceId: "target-public-skincare", niche: "skincare", limit: 2 }),
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "TOOL_NO_PROGRESS",
+          message: expect.stringContaining("enough matching candidates"),
+        },
+      },
+    });
+  });
+
   it("reserves bounded Web Search uses when Claude issues parallel discovery calls", async () => {
     const liveRequest = ResearchRequestSchema.parse({
       niche: "camping lantern",
@@ -300,6 +355,51 @@ describe("research MCP tools", () => {
       isError: true,
       structuredContent: { error: { code: "TOOL_ACTION_LIMIT" } },
     });
+  });
+
+  it("persists safe Web Search result counts without storing provider response text", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "skincare",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      requestedProductCount: 1,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find skincare products with observed prices.",
+    });
+    const events: AgentExecutionEvent[] = [];
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+      onEvent: (event) => {
+        events.push(event);
+      },
+      webSearchFetch: async () => new Response(JSON.stringify({
+        content: [{
+          type: "web_search_tool_result",
+          search_count: 1,
+          content: [{
+            type: "web_search_result",
+            title: "Skincare serum",
+            url: "https://products.example.com/serum",
+            snippet: "Provider response text that must not be persisted without an observed price.",
+          }],
+        }],
+        usage: { input_tokens: 10, output_tokens: 10 },
+      }), { status: 200 }),
+      webSearchResolveAddresses: async () => ["93.184.216.34"],
+    });
+    const discover = handlerFor(definitions, "discover_products");
+
+    await expect(
+      discover({ niche: "skincare", query: "face serum", limit: 1 }),
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "WEB_SEARCH_NO_RESULTS" } },
+    });
+    const failure = events.find((event) => event.type === "tool_failed");
+    expect(failure?.detail).toContain("Search hits: 1; validated candidates: 0; rejected: 1");
+    expect(failure?.detail).not.toContain("Provider response text");
   });
 
   it("persists an actionable sanitized Web Search failure detail", async () => {
