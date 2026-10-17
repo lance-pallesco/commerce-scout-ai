@@ -10,6 +10,9 @@ import { GET as getJob, } from "@/app/api/research-jobs/[jobId]/route";
 import { GET as listJobs, POST as createJob } from "@/app/api/research-jobs/route";
 import { GET as getSources } from "@/app/api/research-sources/route";
 import { getServerConfig } from "@/lib/config/env";
+import { createResearchJob, persistResearchBundle } from "@/lib/jobs/repository";
+import { ResearchRequestSchema } from "@/lib/research/contracts";
+import { collectFixtureProducts } from "@/lib/research/fixture-source";
 import { runResearchWorkerOnce } from "@/lib/jobs/worker";
 
 const databaseFiles: string[] = [];
@@ -80,6 +83,36 @@ describe("research job API", () => {
     const cancellationResponse = await cancelJob(new Request("http://localhost", { method: "POST" }), context);
     expect(cancellationResponse.status).toBe(200);
     expect(((await cancellationResponse.json()) as { job: { status: string } }).job.status).toBe("completed");
+  });
+
+  it("does not export a legacy search-only discovery lead", async () => {
+    configureFixtureEnvironment();
+    const config = getServerConfig();
+    const request = ResearchRequestSchema.parse({ ...submission, mode: "fixtures" });
+    const job = await createResearchJob(request, config);
+    const [fixtureProduct] = collectFixtureProducts({ niche: "skincare", limit: 1 }).products;
+    const discoveryLead = {
+      ...fixtureProduct,
+      id: "anthropic-web-discovery:legacy-search-lead",
+      sourceId: "anthropic-web-discovery",
+      externalId: "legacy-search-lead",
+      name: "Legacy unverified search lead",
+      sourceUrl: "https://shop.example/products/legacy-search-lead",
+      evidenceStatus: "search_discovery" as const,
+    };
+    await persistResearchBundle(config, job.id, [discoveryLead], [], {
+      mode: "claude_agent",
+      limitations: ["Legacy lead for export regression coverage."],
+    });
+
+    const response = await getExport(
+      new Request("http://localhost"),
+      { params: Promise.resolve({ jobId: job.id }) } as never,
+    );
+    const csv = await response.text();
+
+    expect(csv).not.toContain("Legacy unverified search lead");
+    expect(csv.trim().split("\n")).toHaveLength(1);
   });
 
   it("returns consistent client errors for invalid and unknown resources", async () => {
