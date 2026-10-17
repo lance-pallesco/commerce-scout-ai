@@ -7,6 +7,7 @@ import {
   buildCollectionUrl,
   collectWebScraperCatalogProducts,
   createDefaultBrowserLauncher,
+  extractStructuredProductEvidence,
   extractStructuredSearchProducts,
   extractWebScraperCatalogProducts,
 } from "@/lib/research/browser-source";
@@ -223,6 +224,103 @@ describe("webscraper product extraction", () => {
       currency: "USD",
       evidenceStatus: "product_page_verified",
     });
+  });
+
+  it("promotes a matching direct product page when its price is only in server-rendered JSON-LD", () => {
+    const lead = discoveryLead();
+    const structuredProducts = extractStructuredProductEvidence([
+      JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "Verified Glow Serum",
+        offers: {
+          "@type": "Offer",
+          price: "31.50",
+          priceCurrency: "USD",
+          availability: "https://schema.org/InStock",
+        },
+      }),
+    ]);
+
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Glow serum product page",
+      bodyText: "A skincare product with server-rendered structured data.",
+      structuredProducts,
+      verifiedAt: "2026-10-17T00:00:00.000Z",
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(verification).toMatchObject({ code: "VERIFIED" });
+    expect(verification.verifiedProduct).toMatchObject({
+      name: "Verified Glow Serum",
+      price: 31.5,
+      evidenceStatus: "product_page_verified",
+    });
+    expect(verification.verifiedProduct?.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "product-page price source",
+        value: "Observed in server-rendered Product JSON-LD.",
+      }),
+    ]));
+  });
+
+  it("uses product metadata only after visible page identity is verified", () => {
+    const lead = discoveryLead();
+    const structuredProducts = extractStructuredProductEvidence([], {
+      price: "31.50",
+      currency: "USD",
+    });
+
+    const verified = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum is a skincare product.",
+      structuredProducts,
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+    const rejected = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Another product skincare",
+      bodyText: "A skincare product.",
+      structuredProducts,
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(verified).toMatchObject({ code: "VERIFIED" });
+    expect(verified.verifiedProduct?.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "product-page price source",
+        value: "Observed in server-rendered product price metadata.",
+      }),
+    ]));
+    expect(rejected).toMatchObject({ code: "PAGE_IDENTITY_MISMATCH" });
+  });
+
+  it("does not accept an unavailable structured offer as a verified recommendation", () => {
+    const lead = discoveryLead();
+    const structuredProducts = extractStructuredProductEvidence([
+      JSON.stringify({
+        "@type": "Product",
+        name: "Verified Glow Serum",
+        offers: {
+          price: "31.50",
+          priceCurrency: "USD",
+          availability: "https://schema.org/OutOfStock",
+        },
+      }),
+    ]);
+
+    const verification = assessDiscoveredProductPage(lead, {
+      finalUrl: lead.sourceUrl,
+      httpStatus: 200,
+      title: "Verified Glow Serum skincare",
+      bodyText: "Verified Glow Serum skincare product.",
+      structuredProducts,
+    }, { niche: "skincare", minimumPrice: 15, maximumPrice: 60 });
+
+    expect(verification).toMatchObject({ code: "PAGE_UNAVAILABLE" });
+    expect(verification.verifiedProduct).toBeUndefined();
   });
 
   it("rejects a page-observed price outside the submitted range", () => {

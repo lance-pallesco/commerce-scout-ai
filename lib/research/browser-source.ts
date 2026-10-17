@@ -71,11 +71,20 @@ export type ProductPageVerification = Readonly<{
   code: ProductPageVerificationCode;
 }>;
 
+export type ProductPageStructuredEvidence = Readonly<{
+  source: "json_ld" | "meta";
+  name?: string;
+  price?: number;
+  currency?: string;
+  availability?: string;
+}>;
+
 export type ProductPageVerificationEvidence = Readonly<{
   finalUrl: string;
   httpStatus: number | null;
   title: string;
   bodyText: string;
+  structuredProducts?: readonly ProductPageStructuredEvidence[];
   verifiedAt?: string;
 }>;
 
@@ -196,12 +205,16 @@ function pageIdentityTerms(value: string): string[] {
   )];
 }
 
-function hasProductIdentity(lead: DiscoveryLead, pageText: string): boolean {
+function textHasProductIdentity(lead: DiscoveryLead, value: string): boolean {
   const terms = pageIdentityTerms(lead.title);
   if (terms.length === 0) return false;
-  const normalizedPageText = pageText.toLowerCase();
-  const matchedTerms = terms.filter((term) => normalizedPageText.includes(term));
+  const normalizedText = value.toLowerCase();
+  const matchedTerms = terms.filter((term) => normalizedText.includes(term));
   return matchedTerms.length >= Math.min(2, terms.length);
+}
+
+function hasProductIdentity(lead: DiscoveryLead, pageText: string): boolean {
+  return textHasProductIdentity(lead, pageText);
 }
 
 function observedUsdPrice(pageText: string): number | null {
@@ -209,6 +222,147 @@ function observedUsdPrice(pageText: string): number | null {
   if (!match) return null;
   const price = Number(match[1]);
   return Number.isFinite(price) && price >= 0 ? price : null;
+}
+
+function finitePrice(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/,/g, "").trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return undefined;
+  const price = Number(normalized);
+  return Number.isFinite(price) && price >= 0 ? price : undefined;
+}
+
+function boundedText(value: unknown, maximum: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized ? normalized.slice(0, maximum) : undefined;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function jsonLdNodes(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) return value.flatMap(jsonLdNodes);
+  const record = recordValue(value);
+  if (!record) return [];
+  const graph = record["@graph"];
+  return graph === undefined ? [record] : [record, ...jsonLdNodes(graph)];
+}
+
+function isProductType(value: unknown): boolean {
+  return value === "Product" || (Array.isArray(value) && value.includes("Product"));
+}
+
+function offerRecords(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      const record = recordValue(item);
+      return record ? [record] : [];
+    });
+  }
+  const record = recordValue(value);
+  return record ? [record] : [];
+}
+
+/**
+ * Parse only compact, server-rendered product facts. JSON-LD remains
+ * untrusted page data: values are normalized and later require URL, identity,
+ * availability, niche, and price-range validation before persistence.
+ */
+export function extractStructuredProductEvidence(
+  jsonLdPayloads: readonly string[],
+  metaValues: Readonly<{ price?: string; currency?: string }> = {},
+): ProductPageStructuredEvidence[] {
+  const structured: ProductPageStructuredEvidence[] = [];
+  for (const payload of jsonLdPayloads) {
+    try {
+      for (const node of jsonLdNodes(JSON.parse(payload))) {
+        if (!isProductType(node["@type"])) continue;
+        const name = boundedText(node.name, 240);
+        const offers = offerRecords(node.offers);
+        if (offers.length === 0) {
+          structured.push({ source: "json_ld", ...(name ? { name } : {}) });
+          continue;
+        }
+        for (const offer of offers) {
+          const price = finitePrice(offer.price);
+          const currency = boundedText(offer.priceCurrency, 16)?.toUpperCase();
+          const availability = boundedText(offer.availability, 120);
+          structured.push({
+            source: "json_ld",
+            ...(name ? { name } : {}),
+            ...(price === undefined ? {} : { price }),
+            ...(currency ? { currency } : {}),
+            ...(availability ? { availability } : {}),
+          });
+        }
+      }
+    } catch {
+      // Invalid JSON-LD is untrusted page data, not a reason to fail the page.
+    }
+  }
+  const metaPrice = finitePrice(metaValues.price);
+  const metaCurrency = boundedText(metaValues.currency, 16)?.toUpperCase();
+  if (metaPrice !== undefined && metaCurrency) {
+    structured.push({ source: "meta", price: metaPrice, currency: metaCurrency });
+  }
+  return structured;
+}
+
+function isUnavailableStructuredOffer(evidence: ProductPageStructuredEvidence): boolean {
+  return /(?:outofstock|soldout|discontinued|notavailable)/i.test(evidence.availability ?? "");
+}
+
+function matchingStructuredProduct(
+  lead: DiscoveryLead,
+  structuredProducts: readonly ProductPageStructuredEvidence[],
+): ProductPageStructuredEvidence | undefined {
+  return structuredProducts.find((item) => item.name && textHasProductIdentity(lead, item.name));
+}
+
+function observedStructuredUsdPrice(
+  lead: DiscoveryLead,
+  structuredProducts: readonly ProductPageStructuredEvidence[],
+  hasPageIdentity: boolean,
+): { price: number; source: "json_ld" | "meta"; name?: string } | undefined {
+  for (const item of structuredProducts) {
+    if (item.price === undefined || item.currency !== "USD") continue;
+    const identityMatches = item.source === "meta"
+      ? hasPageIdentity
+      : Boolean(item.name && textHasProductIdentity(lead, item.name));
+    if (!identityMatches) continue;
+    return {
+      price: item.price,
+      source: item.source,
+      ...(item.name ? { name: item.name } : {}),
+    };
+  }
+  return undefined;
+}
+
+async function collectStructuredProductEvidence(page: Page): Promise<ProductPageStructuredEvidence[]> {
+  const jsonLdPayloads = await page
+    .locator('script[type="application/ld+json"]')
+    .allTextContents()
+    .catch(() => [] as string[]);
+  const metaValues = await page.locator(
+    'meta[property="product:price:amount"], meta[itemprop="price"], meta[property="product:price:currency"], meta[itemprop="priceCurrency"]',
+  ).evaluateAll((elements) => {
+    const values: { price?: string; currency?: string } = {};
+    for (const element of elements) {
+      const key = element.getAttribute("property") ?? element.getAttribute("itemprop");
+      const value = element.getAttribute("content") ?? element.getAttribute("value") ?? undefined;
+      if (!value) continue;
+      if (key === "product:price:amount" || key === "price") values.price ??= value;
+      if (key === "product:price:currency" || key === "priceCurrency") values.currency ??= value;
+    }
+    return values;
+  }).catch(() => ({}));
+  return extractStructuredProductEvidence(jsonLdPayloads, metaValues);
 }
 
 function pageMatchesNiche(pageText: string, niche: string): boolean {
@@ -259,13 +413,24 @@ export function assessDiscoveredProductPage(
   ) {
     return verificationFailure(lead, "PAGE_UNAVAILABLE");
   }
-  if (!hasProductIdentity(lead, pageText)) {
+  const structuredProducts = evidence.structuredProducts ?? [];
+  const matchingStructured = matchingStructuredProduct(lead, structuredProducts);
+  const pageIdentityMatches = hasProductIdentity(lead, pageText) || Boolean(matchingStructured);
+  if (!pageIdentityMatches) {
     return verificationFailure(lead, "PAGE_IDENTITY_MISMATCH");
   }
-  const price = observedUsdPrice(pageText);
-  if (price === null) {
+  if (matchingStructured && isUnavailableStructuredOffer(matchingStructured)) {
+    return verificationFailure(lead, "PAGE_UNAVAILABLE");
+  }
+  const visiblePrice = observedUsdPrice(pageText);
+  const structuredPrice = observedStructuredUsdPrice(lead, structuredProducts, pageIdentityMatches);
+  const priceObservation = visiblePrice === null
+    ? structuredPrice
+    : { price: visiblePrice, source: "visible" as const };
+  if (!priceObservation) {
     return verificationFailure(lead, "PAGE_PRICE_NOT_OBSERVED");
   }
+  const price = priceObservation.price;
   if (price < criteria.minimumPrice || price > criteria.maximumPrice) {
     return verificationFailure(lead, "PAGE_PRICE_OUT_OF_RANGE");
   }
@@ -274,7 +439,9 @@ export function assessDiscoveredProductPage(
   const verifiedProduct = normalizeProduct(
     {
       externalId: lead.externalId,
-      name: lead.title,
+      // A matching Product JSON-LD name is product-page evidence and is more
+      // specific than an untrusted search-citation title.
+      name: matchingStructured?.name ?? lead.title,
       // The browser obtains the full page only for deterministic validation.
       // Do not persist unrestricted page text or provider snippets as a
       // product description; the page title remains traceable provenance.
@@ -305,6 +472,17 @@ export function assessDiscoveredProductPage(
         {
           field: "product-page verification",
           value: "Product page responded successfully with matching identity, niche, and observed price.",
+          sourceUrl: finalUrl.toString(),
+          observedAt: verifiedAt,
+          confidence: "high",
+        },
+        {
+          field: "product-page price source",
+          value: priceObservation.source === "json_ld"
+            ? "Observed in server-rendered Product JSON-LD."
+            : priceObservation.source === "meta"
+              ? "Observed in server-rendered product price metadata."
+              : "Observed in visible product-page text.",
           sourceUrl: finalUrl.toString(),
           observedAt: verifiedAt,
           confidence: "high",
@@ -420,6 +598,7 @@ export async function verifyDiscoveredProductPages(
           httpStatus: response?.status() ?? null,
           title: await page.title(),
           bodyText: (await page.locator("body").innerText()).slice(0, 40_000),
+          structuredProducts: await collectStructuredProductEvidence(page),
         }, options);
         if (assessed.verifiedProduct) verifiedProducts.push(assessed.verifiedProduct);
         else rejected.push(assessed);

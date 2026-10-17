@@ -534,7 +534,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
 
   const getProductDetails = tool(
     "get_product_details",
-    "Return available details only for a product previously discovered during this job. It never accepts URLs.",
+    "Return available details only for a product previously discovered during this job. It never accepts URLs or navigates to them. Dynamic discovery leads remain unverified until the restricted worker performs product-page verification after the Claude run.",
     {
       sourceId: z.string().min(1).max(80).describe("The discovered product source identifier"),
       productId: z.string().min(1).max(160).describe("A discovered product identifier"),
@@ -564,9 +564,19 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             ? getFixtureProductDetails(input.productId)
             : null;
         const product = fixtureDetails ?? discovered;
+        const isDiscoveryLead = "observedPrice" in product;
         const data = {
           product,
-          unavailableFields: "missingFields" in product ? product.missingFields : ["product-page verification"],
+          unavailableFields: "missingFields" in product
+            ? product.missingFields
+            : ["product-page verification pending restricted worker"],
+          ...(isDiscoveryLead
+            ? {
+                verificationStatus: "pending_worker_verification",
+                verificationDetail:
+                  "The restricted worker verifies the observed product URL after the Claude run; this read-only tool does not navigate to product pages.",
+              }
+            : {}),
         };
         await recordEvent(state, "tool_completed", toolName);
         return toolSuccess(data);

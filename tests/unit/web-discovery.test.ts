@@ -4,7 +4,9 @@ import { getServerConfig } from "@/lib/config/env";
 import {
   buildDiscoverySearchQuery,
   discoverProductsWithWebSearch,
+  prioritizeDiscoveryLeads,
 } from "@/lib/research/web-discovery";
+import type { DiscoveryLead } from "@/lib/research/contracts";
 
 const config = getServerConfig({
   RESEARCH_MODE: "live",
@@ -62,6 +64,25 @@ function openRouterCitationResponse(
 }
 
 describe("Anthropic web discovery", () => {
+  it("prioritizes direct product pages before collection and search pages without discarding leads", () => {
+    const lead = (title: string, sourceUrl: string): DiscoveryLead => ({
+      id: `anthropic-web-discovery:${title}`,
+      sourceId: "anthropic-web-discovery",
+      externalId: title,
+      title,
+      snippet: null,
+      observedPrice: null,
+      currency: null,
+      sourceUrl,
+      observedAt: "2026-10-17T00:00:00.000Z",
+    });
+    const category = lead("Skincare collection", "https://shop.example/collections/best-sellers");
+    const direct = lead("Glow serum", "https://shop.example/products/glow-serum");
+    const search = lead("Store search", "https://shop.example/search?q=serum");
+
+    expect(prioritizeDiscoveryLeads([category, search, direct])).toEqual([direct, category, search]);
+  });
+
   it("keeps Claude's product-focused niche query from being duplicated", () => {
     expect(buildDiscoverySearchQuery("furniture", "furniture storage cabinet under 60 USD"))
       .toBe("furniture storage cabinet under 60 USD");

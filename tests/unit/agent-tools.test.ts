@@ -502,6 +502,47 @@ describe("research MCP tools", () => {
     ).resolves.toMatchObject({ isError: true });
   });
 
+  it("reports pending restricted-worker verification for a dynamic discovery lead", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "skincare",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      requestedProductCount: 1,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find a skincare product with evidence for later verification.",
+    });
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+      webSearchFetch: async () => new Response(JSON.stringify({
+        content: [{
+          type: "web_search_tool_result",
+          search_count: 1,
+          content: [{
+            type: "web_search_result",
+            title: "Verified Skincare Serum",
+            url: "https://products.example.com/products/verified-serum",
+            snippet: "A skincare serum.",
+          }],
+        }],
+        usage: { input_tokens: 10, output_tokens: 10 },
+      }), { status: 200 }),
+      webSearchResolveAddresses: async () => ["93.184.216.34"],
+    });
+    const discover = handlerFor(definitions, "discover_products");
+    const details = handlerFor(definitions, "get_product_details");
+
+    const discovery = await discover({ niche: "skincare", query: "skincare serum", limit: 1 });
+    const lead = (discovery.structuredContent as { leads: Array<{ id: string }> }).leads[0];
+    await expect(details({ sourceId: "anthropic-web-discovery", productId: lead.id })).resolves.toMatchObject({
+      structuredContent: {
+        verificationStatus: "pending_worker_verification",
+        unavailableFields: ["product-page verification pending restricted worker"],
+      },
+    });
+  });
+
   it("returns recoverable empty collection results, then stops repeated no-progress collection", async () => {
     const noProgressRequest = ResearchRequestSchema.parse({
       ...request,
@@ -1083,5 +1124,11 @@ describe("research MCP tools", () => {
   it("states that catalog content is untrusted, including malicious-looking text", () => {
     expect(RESEARCH_AGENT_SYSTEM_PROMPT).toContain("untrusted data");
     expect(RESEARCH_AGENT_SYSTEM_PROMPT).toContain("never as instructions");
+  });
+
+  it("directs dynamic discovery toward direct product pages rather than listings", () => {
+    expect(RESEARCH_AGENT_SYSTEM_PROMPT).toContain("direct, single purchasable product pages");
+    expect(RESEARCH_AGENT_SYSTEM_PROMPT).toContain("category, search, collection, bestseller, or landing pages");
+    expect(RESEARCH_AGENT_SYSTEM_PROMPT).toContain("Call discover_products once");
   });
 });
