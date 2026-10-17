@@ -13,7 +13,7 @@ import {
   createResearchToolDefinitions,
 } from "@/lib/agent/research-tools";
 import { collectFixtureProducts } from "@/lib/research/fixture-source";
-import { ResearchRequestSchema } from "@/lib/research/contracts";
+import { ResearchRequestSchema, type ProductCandidate } from "@/lib/research/contracts";
 
 const request = ResearchRequestSchema.parse({
   niche: "skincare",
@@ -168,6 +168,104 @@ describe("research MCP tools", () => {
     await expect(first).resolves.toMatchObject({
       isError: true,
       structuredContent: { error: { code: "WEB_SEARCH_NO_RESULTS" } },
+    });
+  });
+
+  it("does not snapshot candidates while a concurrent discovery call is still running", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "camping lantern",
+      minimumPrice: 10,
+      maximumPrice: 100,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find portable camping lantern products with observed prices.",
+    });
+    let releaseResponse: (() => void) | undefined;
+    let beginRequest: (() => void) | undefined;
+    const requestStarted = new Promise<void>((resolve) => {
+      beginRequest = resolve;
+    });
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+      webSearchFetch: async () => {
+        beginRequest?.();
+        await new Promise<void>((resolve) => {
+          releaseResponse = resolve;
+        });
+        return new Response(JSON.stringify({
+          content: [{
+            type: "web_search_tool_result",
+            search_count: 1,
+            content: [{
+              type: "web_search_result",
+              title: "Rechargeable Camping Lantern",
+              url: "https://products.example.com/lantern",
+              snippet: "Portable lantern, price $29.99.",
+            }],
+          }],
+          usage: { input_tokens: 10, output_tokens: 10 },
+        }), { status: 200 });
+      },
+      webSearchResolveAddresses: async () => ["93.184.216.34"],
+    });
+    const discover = handlerFor(definitions, "discover_products");
+    const getCandidates = handlerFor(definitions, "get_research_candidates");
+
+    const discovery = discover({ niche: "camping lantern", query: "portable lantern", limit: 2 });
+    await requestStarted;
+    let candidatesSettled = false;
+    const candidates = getCandidates({}).then((result) => {
+      candidatesSettled = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(candidatesSettled).toBe(false);
+
+    releaseResponse?.();
+    await expect(discovery).resolves.not.toHaveProperty("isError");
+    await expect(candidates).resolves.toMatchObject({
+      structuredContent: { total: 1 },
+    });
+  });
+
+  it("retains observed Web Search usage when no matching records are returned", async () => {
+    const liveRequest = ResearchRequestSchema.parse({
+      niche: "camping lantern",
+      minimumPrice: 10,
+      maximumPrice: 100,
+      requestedProductCount: 2,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Find portable camping lantern products with observed prices.",
+    });
+    const definitions = createResearchToolDefinitions({
+      request: liveRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+      webSearchFetch: async () => new Response(JSON.stringify({
+        content: [{ type: "web_search_tool_result", search_count: 2, content: [] }],
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          server_tool_use: { web_search_requests: 2 },
+        },
+      }), { status: 200 }),
+    });
+    const discover = handlerFor(definitions, "discover_products");
+
+    await expect(
+      discover({ niche: "camping lantern", query: "portable lantern", limit: 2 }),
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "WEB_SEARCH_NO_RESULTS" } },
+    });
+    expect(definitions.getAdditionalCostUsd()).toBeGreaterThanOrEqual(0.02);
+    await expect(
+      discover({ niche: "camping lantern", query: "rechargeable lantern", limit: 2 }),
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "TOOL_ACTION_LIMIT" } },
     });
   });
 
@@ -374,6 +472,103 @@ describe("research MCP tools", () => {
     });
 
     expect(result).toMatchObject({ status: "partial", candidates: [] });
+  });
+
+  it("downgrades a search-result-only report to partial and records its verification limit", async () => {
+    const fixtureProduct = collectFixtureProducts({ niche: "skincare", limit: 1 }).products[0];
+    const candidates: ProductCandidate[] = [{
+      ...fixtureProduct,
+      id: "anthropic-web-discovery:hydrating-serum",
+      sourceId: "anthropic-web-discovery",
+      category: null,
+      imageUrl: null,
+      missingFields: ["category", "imageUrl"],
+    }];
+    const dynamicRequest = ResearchRequestSchema.parse({
+      niche: "skincare",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      requestedProductCount: 1,
+      sourceIds: ["anthropic-web-discovery"],
+      mode: "live",
+      objective: "Identify a skincare product worth further evidence-based investigation.",
+    });
+    const result = await runResearchAgent({
+      request: dynamicRequest,
+      config: getServerConfig({ RESEARCH_MODE: "live", ANTHROPIC_API_KEY: "test-key" }),
+      queryExecutor: async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          total_cost_usd: 0.01,
+          num_turns: 2,
+          structured_output: {
+            completion: "completed",
+            executiveSummary: "A search result returned one matching candidate.",
+            limitations: [],
+            findings: [{
+              productId: candidates[0].id,
+              summary: "A search result included a price snippet.",
+              customerAppeal: "Requires independent verification.",
+              differentiationConsiderations: [],
+              risks: ["The product page was not verified."],
+              missingInformation: ["Product-page verification"],
+              confidence: "low",
+            }],
+          },
+        } as unknown as SDKMessage;
+      },
+      mcpServerFactory: () => ({
+        server: {} as ReturnType<typeof createResearchMcpServer>["server"],
+        getCandidates: () => candidates,
+      }),
+    });
+
+    expect(result).toMatchObject({ status: "partial", report: { completion: "partial" } });
+    expect(result.report?.limitations.join(" ")).toContain("not independently verified");
+  });
+
+  it("waits for already-dispatched evidence operations before validating terminal output", async () => {
+    const candidates = collectFixtureProducts({ niche: "skincare", limit: 1 }).products;
+    let settleOperations = false;
+    const result = await runResearchAgent({
+      request,
+      config,
+      queryExecutor: async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          total_cost_usd: 0.01,
+          num_turns: 2,
+          structured_output: {
+            completion: "completed",
+            executiveSummary: "One collected fixture candidate is ready for follow-up.",
+            limitations: ["Synthetic fixture evidence only."],
+            findings: [{
+              productId: candidates[0].id,
+              summary: "Observed fixture details are available.",
+              customerAppeal: "Requires live-market validation.",
+              differentiationConsiderations: [],
+              risks: [],
+              missingInformation: candidates[0].missingFields,
+              confidence: "low",
+            }],
+          },
+        } as unknown as SDKMessage;
+      },
+      mcpServerFactory: () => ({
+        server: {} as ReturnType<typeof createResearchMcpServer>["server"],
+        getCandidates: () => (settleOperations ? candidates : []),
+        getAdditionalCostUsd: () => (settleOperations ? 0.02 : 0),
+        waitForPendingOperations: async () => {
+          settleOperations = true;
+        },
+      }),
+    });
+
+    expect(result).toMatchObject({ status: "completed", candidates, estimatedCostUsd: 0.03 });
   });
 
   it("retains an SDK terminal error category when the single-shot iterator throws afterward", async () => {

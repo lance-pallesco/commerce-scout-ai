@@ -72,7 +72,10 @@ describe("research job API", () => {
 
     const exportResponse = await getExport(new Request("http://localhost"), context);
     expect(exportResponse.headers.get("content-type")).toContain("text/csv");
-    expect(await exportResponse.text()).toContain("Niacinamide 10% Barrier Serum");
+    const csv = await exportResponse.text();
+    expect(csv).toContain("Niacinamide 10% Barrier Serum");
+    expect(csv).toContain("evidence_scope");
+    expect(csv).toContain("source_verified");
 
     const cancellationResponse = await cancelJob(new Request("http://localhost", { method: "POST" }), context);
     expect(cancellationResponse.status).toBe(200);
@@ -202,8 +205,7 @@ describe("research job API", () => {
       liveAgentAvailable: false,
       sources: expect.arrayContaining([
         expect.objectContaining({ id: "webscraper-ecommerce-demo" }),
-        expect.objectContaining({ id: "target-public-skincare", searchable: true }),
-        expect.objectContaining({ id: "ikea-public-search", searchable: true }),
+        expect.objectContaining({ id: "anthropic-web-discovery", searchable: true }),
       ]),
     });
 

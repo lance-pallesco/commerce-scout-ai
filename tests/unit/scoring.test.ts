@@ -38,6 +38,7 @@ describe("evidence-based scoring", () => {
       productId: "source:b",
       score: { priceFit: 20, evidenceQuality: 20, nicheRelevance: 20, informationCompleteness: 20, total: 80 },
       evidenceQuality: "high" as const,
+      evidenceScope: "source_verified" as const,
       observedStrengths: [],
       concerns: [],
       missingInformation: [],
@@ -85,5 +86,26 @@ describe("evidence-based scoring", () => {
 
     expect(evaluations.find((item) => item.productId === products[0].id)?.agentFinding).toBeDefined();
     expect(evaluations[0].score.total).toBe(100);
+  });
+
+  it("caps Web Search discovery leads below verified catalog evidence", () => {
+    const product = {
+      ...collectFixtureProducts({ niche: "skincare", limit: 1 }).products[0],
+      id: "anthropic-web-discovery:serum",
+      sourceId: "anthropic-web-discovery",
+      category: null,
+      imageUrl: null,
+      missingFields: ["category", "imageUrl"],
+    };
+
+    const evaluation = scoreProduct(product, criteria);
+
+    expect(evaluation).toMatchObject({
+      evidenceScope: "search_discovery",
+      evidenceQuality: "low",
+    });
+    expect(evaluation.score.total).toBeLessThanOrEqual(65);
+    expect(evaluation.concerns.join(" ")).toContain("Product-page verification");
+    expect(evaluation.missingInformation).toContain("product-page verification");
   });
 });

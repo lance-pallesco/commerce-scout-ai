@@ -5,6 +5,7 @@ import {
   type ServerConfig,
 } from "@/lib/config/env";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
+import { isSearchDiscoverySource } from "@/lib/research/source-registry";
 
 import {
   AgentResearchReportSchema,
@@ -32,6 +33,7 @@ Safety and truthfulness rules:
 - Do not turn missing evidence into a positive claim. Include it under missing information or risks.
 - Do not keep a candidate whose observed name, category, or description does not match the requested niche or whose observed price is outside the requested range.
 - Every finding must use a productId returned by the research tools.
+- Treat Web Search candidates as discovery leads, not product-page verification. If all retained candidates are search-result discoveries, return a partial report and name the verification gap.
 - Do not provide medical, regulatory, or efficacy claims. Use cautious language for skincare and beauty products.
 `;
 
@@ -143,6 +145,25 @@ function validateReport(
   }
 
   return report.data;
+}
+
+const SEARCH_DISCOVERY_LIMITATION =
+  "Search-result discoveries retain observed titles, snippets, and URLs, but their product pages were not independently verified by an approved browser source.";
+
+function applyEvidenceCompletionBoundary(
+  report: AgentResearchReport,
+  candidates: readonly ProductCandidate[],
+): AgentResearchReport {
+  const hasOnlySearchDiscoveries =
+    candidates.length > 0 && candidates.every((candidate) => isSearchDiscoverySource(candidate.sourceId));
+  const hasSearchDiscovery = candidates.some((candidate) => isSearchDiscoverySource(candidate.sourceId));
+  if (!hasSearchDiscovery) return report;
+
+  return AgentResearchReportSchema.parse({
+    ...report,
+    completion: hasOnlySearchDiscoveries ? "partial" : report.completion,
+    limitations: [...new Set([...report.limitations, SEARCH_DISCOVERY_LIMITATION])].slice(0, 15),
+  });
 }
 
 function toFailure(
@@ -306,10 +327,18 @@ export async function runResearchAgent(
     }
     const resultError = classifyResult(finalResult);
     if (resultError) throw resultError;
+    // The SDK may dispatch independent MCP calls in one assistant turn. Never
+    // snapshot candidates or cost while a bounded evidence operation is still
+    // settling, otherwise a report can finalize before its tool result exists.
+    await mcp.waitForPendingOperations?.();
+    if (abortController.signal.aborted) throw interruptionError();
     collectedCandidates = mcp.getCandidates();
     const structuredOutput =
       "structured_output" in finalResult ? finalResult.structured_output : undefined;
-    const report = validateReport(structuredOutput, collectedCandidates);
+    const report = applyEvidenceCompletionBoundary(
+      validateReport(structuredOutput, collectedCandidates),
+      collectedCandidates,
+    );
     await emit({ type: "agent_structured_output_validated", at: new Date().toISOString() });
     await emit({ type: "agent_completed", at: new Date().toISOString() });
 

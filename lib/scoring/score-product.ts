@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { AgentProductFinding, AgentResearchReport } from "@/lib/agent/contracts";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
 import { productMatchesNiche } from "@/lib/research/normalize";
+import { isSearchDiscoverySource } from "@/lib/research/source-registry";
 
 export const ScoreBreakdownSchema = z.object({
   priceFit: z.number().int().min(0).max(25),
@@ -16,6 +17,7 @@ export const ProductEvaluationSchema = z.object({
   productId: z.string().min(1),
   score: ScoreBreakdownSchema,
   evidenceQuality: z.enum(["high", "medium", "low"]),
+  evidenceScope: z.enum(["source_verified", "search_discovery"]).default("source_verified"),
   observedStrengths: z.array(z.string().min(1)).max(10),
   concerns: z.array(z.string().min(1)).max(15),
   missingInformation: z.array(z.string().min(1)).max(20),
@@ -32,6 +34,9 @@ export const ProductEvaluationSchema = z.object({
 
 export type ScoreBreakdown = z.infer<typeof ScoreBreakdownSchema>;
 export type ProductEvaluation = z.infer<typeof ProductEvaluationSchema>;
+
+const SEARCH_DISCOVERY_VERIFICATION_GAP =
+  "Product-page verification is not available for this search-result discovery record.";
 
 function countAvailableEvidence(product: ProductCandidate): number {
   return [
@@ -60,6 +65,7 @@ export function scoreProduct(
 ): Omit<ProductEvaluation, "agentFinding"> {
   const observedStrengths: string[] = [];
   const concerns: string[] = [];
+  const searchDiscoveryOnly = isSearchDiscoverySource(product.sourceId);
   const priceFit =
     product.price !== null &&
     product.price >= request.minimumPrice &&
@@ -73,35 +79,48 @@ export function scoreProduct(
   }
 
   const evidenceCount = countAvailableEvidence(product);
-  const evidenceQuality = Math.round((evidenceCount / 5) * 30);
-  if (evidenceCount >= 4) {
+  const rawEvidenceQuality = Math.round((evidenceCount / 5) * 30);
+  const evidenceQuality = searchDiscoveryOnly
+    ? Math.min(rawEvidenceQuality, 12)
+    : rawEvidenceQuality;
+  if (!searchDiscoveryOnly && evidenceCount >= 4) {
     observedStrengths.push("Most core catalog fields are available as source evidence.");
+  } else if (searchDiscoveryOnly) {
+    concerns.push(SEARCH_DISCOVERY_VERIFICATION_GAP);
   } else {
     concerns.push("Core catalog evidence is incomplete.");
   }
 
   const nicheRelevance = productMatchesNiche(product, request.niche) ? 20 : 0;
   if (nicheRelevance === 20) {
-    observedStrengths.push("The source categorizes this record in the selected niche.");
+    observedStrengths.push("Observed title, category, or description matches the selected niche.");
   } else {
     concerns.push("The collected record does not match the selected niche.");
   }
 
-  const informationCompleteness = Math.round((evidenceCount / 5) * 25);
+  const rawInformationCompleteness = Math.round((evidenceCount / 5) * 25);
+  const informationCompleteness = searchDiscoveryOnly
+    ? Math.min(rawInformationCompleteness, 8)
+    : rawInformationCompleteness;
+  const missingInformation = [
+    ...product.missingFields,
+    ...(searchDiscoveryOnly ? ["product-page verification"] : []),
+  ];
   if (product.missingFields.length > 0) {
     concerns.push(`Missing source fields: ${product.missingFields.join(", ")}.`);
   }
   const total = priceFit + evidenceQuality + nicheRelevance + informationCompleteness;
   const evidenceLevel =
-    evidenceCount === 5 ? "high" : evidenceCount >= 3 ? "medium" : "low";
+    searchDiscoveryOnly ? "low" : evidenceCount === 5 ? "high" : evidenceCount >= 3 ? "medium" : "low";
 
   return ProductEvaluationSchema.parse({
     productId: product.id,
     score: { priceFit, evidenceQuality, nicheRelevance, informationCompleteness, total },
     evidenceQuality: evidenceLevel,
+    evidenceScope: searchDiscoveryOnly ? "search_discovery" : "source_verified",
     observedStrengths,
     concerns,
-    missingInformation: product.missingFields,
+    missingInformation,
   });
 }
 

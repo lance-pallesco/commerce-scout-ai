@@ -60,6 +60,33 @@ not implicit permission to navigate arbitrary pages. A run with no matching
 evidence returns a partial/empty result rather than substituting another
 category.
 
+## Evidence-quality boundary (2026-10-17)
+
+`discover_products` is a discovery capability, not product-page verification.
+Only a result title, snippet, URL, and an explicitly observed price string are
+retained. The request niche is never copied into a candidate category, every
+meaningful niche term and the full requested price range are checked again on
+the server, and unsafe URLs are discarded.
+
+The scoring layer marks those records as `search_discovery`, caps them at
+65/100, adds a product-page verification gap, and the dashboard and CSV expose
+that scope. If every retained record came from Web Search, the worker forces
+the agent report to `partial` even when the model returned `completed`.
+Playwright is used only for registered browser adapters; it does not fetch a
+dynamic result URL merely because Claude mentioned it.
+
+MCP evidence operations are tracked until settled before the worker snapshots
+candidates, costs, and the final report. This prevents a concurrently issued
+Web Search result from arriving after job finalization. The search-use charge
+and response token estimate are added to the Agent SDK estimate when Anthropic
+returns usage metadata. A transport timeout cannot expose final server usage,
+so it remains an explicitly uncertain cost outcome rather than a claim of zero
+cost. The Agent SDK budget and the direct Web Search budget are independently
+enforced; this local MVP does not yet have a provider-wide, in-flight aggregate
+spend ledger. The two-search cap, output-token cap, timeout, and per-lane
+budget still bound the request surface, but a production deployment should add
+that ledger before treating the configured value as an absolute total bill cap.
+
 ## What would be required to enable built-in web tools later
 
 This should be a separately reviewed feature, not a flag flip. It would need:

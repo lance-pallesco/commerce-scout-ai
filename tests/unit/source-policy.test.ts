@@ -39,8 +39,6 @@ describe("browser source policy", () => {
     expect(listCompatibleResearchSources("facial serum", "live").map((item) => item.id)).toContain("target-public-skincare");
     expect(listCompatibleResearchSources("garden tractors", "live").map((item) => item.id)).toEqual([
       "anthropic-web-discovery",
-      "target-public-skincare",
-      "ikea-public-search",
     ]);
   });
 });

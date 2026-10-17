@@ -4,7 +4,8 @@ import type { Database, SqlValue } from "sql.js";
 import { assertLiveResearchAvailable, type ServerConfig } from "@/lib/config/env";
 import type { AgentResearchReport } from "@/lib/agent/contracts";
 import type { ProductCandidate, ResearchRequest } from "@/lib/research/contracts";
-import type { ProductEvaluation } from "@/lib/scoring/score-product";
+import { ProductEvaluationSchema, type ProductEvaluation } from "@/lib/scoring/score-product";
+import { isSearchDiscoverySource } from "@/lib/research/source-registry";
 import { queryRows, withDatabase } from "@/lib/persistence/database";
 import {
   assertSourceSupportsNiche,
@@ -520,12 +521,23 @@ export async function getResearchProducts(
         LEFT JOIN product_evaluations AS evaluations ON evaluations.product_id = products.id
         WHERE products.job_id = ?`,
       [jobId],
-    ).map((row) => ({
-      product: JSON.parse(asString(row.product_json)) as ProductCandidate,
-      evaluation: row.evaluation_json
-        ? (JSON.parse(asString(row.evaluation_json)) as ProductEvaluation)
-        : null,
-    })),
+    ).map((row) => {
+      const product = JSON.parse(asString(row.product_json)) as ProductCandidate;
+      const rawEvaluation = row.evaluation_json
+        ? JSON.parse(asString(row.evaluation_json))
+        : null;
+      return {
+        product,
+        evaluation: rawEvaluation
+          ? ProductEvaluationSchema.parse({
+              ...rawEvaluation,
+              evidenceScope:
+                (rawEvaluation as { evidenceScope?: unknown }).evidenceScope ??
+                (isSearchDiscoverySource(product.sourceId) ? "search_discovery" : "source_verified"),
+            })
+          : null,
+      };
+    }),
   );
 }
 

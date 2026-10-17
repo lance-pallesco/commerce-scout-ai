@@ -12,7 +12,14 @@ const config = getServerConfig({
   WEB_SEARCH_MAX_TOKENS: "1200",
 });
 
-function response(content: unknown, usage = { input_tokens: 100, output_tokens: 50 }): Response {
+function response(
+  content: unknown,
+  usage: Readonly<{
+    input_tokens: number;
+    output_tokens: number;
+    server_tool_use?: Readonly<{ web_search_requests: number }>;
+  }> = { input_tokens: 100, output_tokens: 50 },
+): Response {
   return new Response(JSON.stringify({ content, usage }), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -60,8 +67,15 @@ describe("Anthropic web discovery", () => {
       sourceId: "anthropic-web-discovery",
       name: "Hydrating Skincare Face Serum",
       price: 24.99,
+      category: null,
       sourceUrl: "https://products.example.com/serum",
     });
+    expect(result.products[0].evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ field: "name", confidence: "medium" }),
+        expect.objectContaining({ field: "price", confidence: "medium" }),
+      ]),
+    );
     expect(result.searchUses).toBe(1);
     expect(result.estimatedCostUsd).toBeGreaterThan(0.01);
     expect(requestBody).toMatchObject({
@@ -118,6 +132,39 @@ describe("Anthropic web discovery", () => {
     });
   });
 
+  it("uses Anthropic's observed Web Search usage for bounded cost accounting", async () => {
+    const result = await discoverProductsWithWebSearch({
+      niche: "skincare",
+      query: "face serum",
+      minimumPrice: 15,
+      maximumPrice: 60,
+      limit: 1,
+      config,
+      fetchImpl: async () =>
+        response(
+          [{
+            type: "web_search_tool_result",
+            search_count: 1,
+            content: [{
+              type: "web_search_result",
+              title: "Skincare Face Serum",
+              url: "https://products.example.com/serum",
+              snippet: "Price $24.",
+            }],
+          }],
+          {
+            input_tokens: 100,
+            output_tokens: 50,
+            server_tool_use: { web_search_requests: 2 },
+          },
+        ),
+      resolveAddresses: async () => ["93.184.216.34"],
+    });
+
+    expect(result.searchUses).toBe(2);
+    expect(result.estimatedCostUsd).toBeGreaterThanOrEqual(0.02);
+  });
+
   it("rejects private and non-HTTPS result URLs without trusting fabricated evidence", async () => {
     const result = await discoverProductsWithWebSearch({
       niche: "camping lantern",
@@ -146,6 +193,35 @@ describe("Anthropic web discovery", () => {
 
     expect(result.products).toEqual([]);
     expect(result.rejectedUrlCount).toBe(1);
+  });
+
+  it("does not accept a generic modifier as proof of a multi-term niche", async () => {
+    const result = await discoverProductsWithWebSearch({
+      niche: "wireless earbuds",
+      query: "affordable wireless earbuds",
+      minimumPrice: 10,
+      maximumPrice: 100,
+      limit: 5,
+      config,
+      fetchImpl: async () =>
+        response([
+          {
+            type: "web_search_tool_result",
+            search_count: 1,
+            content: [
+              {
+                type: "web_search_result",
+                title: "Wireless charger",
+                url: "https://products.example.com/charger",
+                snippet: "A compact charging pad. Price $29.",
+              },
+            ],
+          },
+        ]),
+      resolveAddresses: async () => ["93.184.216.34"],
+    });
+
+    expect(result.products).toEqual([]);
   });
 
   it("fails closed when the search response has no usable results", async () => {

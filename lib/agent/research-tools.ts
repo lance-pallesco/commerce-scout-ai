@@ -81,6 +81,9 @@ type MutableResearchToolContext = ResearchToolContext & {
   webSearchUses: number;
   webSearchUsesReserved: number;
   webDiscoveryAttempted: boolean;
+  activeEvidenceOperations: number;
+  evidenceOperationsDrained: Promise<void>;
+  resolveEvidenceOperationsDrained?: () => void;
 };
 
 function safeText(value: unknown): string {
@@ -191,7 +194,32 @@ function buildToolContext(context: ResearchToolContext): MutableResearchToolCont
     webSearchUses: 0,
     webSearchUsesReserved: 0,
     webDiscoveryAttempted: false,
+    activeEvidenceOperations: 0,
+    evidenceOperationsDrained: Promise.resolve(),
   };
+}
+
+function beginEvidenceOperation(context: MutableResearchToolContext): () => void {
+  if (context.activeEvidenceOperations === 0) {
+    context.evidenceOperationsDrained = new Promise<void>((resolve) => {
+      context.resolveEvidenceOperationsDrained = resolve;
+    });
+  }
+  context.activeEvidenceOperations += 1;
+
+  return () => {
+    context.activeEvidenceOperations -= 1;
+    if (context.activeEvidenceOperations === 0) {
+      context.resolveEvidenceOperationsDrained?.();
+      context.resolveEvidenceOperationsDrained = undefined;
+    }
+  };
+}
+
+async function waitForEvidenceOperations(context: MutableResearchToolContext): Promise<void> {
+  if (context.activeEvidenceOperations > 0) {
+    await context.evidenceOperationsDrained;
+  }
 }
 
 export function createResearchToolDefinitions(context: ResearchToolContext) {
@@ -257,20 +285,27 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         }
         fingerprintAction(state, toolName, input);
         await recordEvent(state, "tool_started", toolName, `sourceId=${input.sourceId}`);
+        await waitForEvidenceOperations(state);
         const candidateCountBeforeCollection = state.candidates.length;
-        const result = await collectProducts(
-          {
-            sourceId: input.sourceId,
-            niche: state.request.niche,
-            searchQuery: input.query ? `${state.request.niche} ${input.query}` : state.request.niche,
-            limit: Math.min(input.limit, state.request.requestedProductCount),
-            minimumPrice: state.request.minimumPrice,
-            maximumPrice: state.request.maximumPrice,
-            mode: state.request.mode,
-            signal: state.signal,
-          },
-          state.config,
-        );
+        const finishEvidenceOperation = beginEvidenceOperation(state);
+        let result: Awaited<ReturnType<typeof collectProducts>>;
+        try {
+          result = await collectProducts(
+            {
+              sourceId: input.sourceId,
+              niche: state.request.niche,
+              searchQuery: input.query ? `${state.request.niche} ${input.query}` : state.request.niche,
+              limit: Math.min(input.limit, state.request.requestedProductCount),
+              minimumPrice: state.request.minimumPrice,
+              maximumPrice: state.request.maximumPrice,
+              mode: state.request.mode,
+              signal: state.signal,
+            },
+            state.config,
+          );
+        } finally {
+          finishEvidenceOperation();
+        }
         state.candidates = deduplicateProducts([
           ...state.candidates,
           ...result.products,
@@ -341,6 +376,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         // Claude may issue parallel MCP calls; reserving here prevents those
         // calls from exceeding the server-side search budget.
         state.webSearchUsesReserved += remainingSearchUses;
+        const finishEvidenceOperation = beginEvidenceOperation(state);
         let result: Awaited<ReturnType<typeof discoverProductsWithWebSearch>>;
         try {
           result = await discoverProductsWithWebSearch({
@@ -355,8 +391,18 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
             fetchImpl: state.webSearchFetch,
             resolveAddresses: state.webSearchResolveAddresses,
           });
+        } catch (error) {
+          // A safe Web Search failure can still carry observed server usage
+          // (for example, a search that found no usable product records).
+          // Retain that known cost and quota before returning the safe error.
+          if (error instanceof WebDiscoveryError) {
+            state.webSearchCostUsd += error.estimatedCostUsd ?? 0;
+            state.webSearchUses += error.searchUses ?? 0;
+          }
+          throw error;
         } finally {
           state.webSearchUsesReserved -= remainingSearchUses;
+          finishEvidenceOperation();
         }
         state.webSearchCostUsd += result.estimatedCostUsd;
         state.webSearchUses += result.searchUses;
@@ -411,6 +457,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         approvedSource(state, input.sourceId);
         fingerprintAction(state, toolName, input);
         await recordEvent(state, "tool_started", toolName);
+        await waitForEvidenceOperations(state);
         const discovered = state.candidates.find(
           (candidate) =>
             candidate.id === input.productId && candidate.sourceId === input.sourceId,
@@ -450,6 +497,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
         assertActive(state);
         fingerprintAction(state, toolName, input);
         await recordEvent(state, "tool_started", toolName);
+        await waitForEvidenceOperations(state);
         const offset = input.offset ?? 0;
         const limit = input.limit ?? 25;
         const data = {
@@ -506,6 +554,7 @@ export function createResearchToolDefinitions(context: ResearchToolContext) {
     tools: [listSources, discoverProductsTool, collectProductsTool, getProductDetails, getCandidates, getCriteria],
     getCandidates: () => [...state.candidates],
     getAdditionalCostUsd: () => state.webSearchCostUsd,
+    waitForPendingOperations: () => waitForEvidenceOperations(state),
   };
 }
 
@@ -538,6 +587,7 @@ export type ResearchMcpServer = Readonly<{
   server: ReturnType<typeof createSdkMcpServer>;
   getCandidates: () => ProductCandidate[];
   getAdditionalCostUsd?: () => number;
+  waitForPendingOperations?: () => Promise<void>;
 }>;
 
 export function createResearchMcpServer(context: ResearchToolContext): ResearchMcpServer {
@@ -554,5 +604,6 @@ export function createResearchMcpServer(context: ResearchToolContext): ResearchM
     }),
     getCandidates: definition.getCandidates,
     getAdditionalCostUsd: definition.getAdditionalCostUsd,
+    waitForPendingOperations: definition.waitForPendingOperations,
   };
 }

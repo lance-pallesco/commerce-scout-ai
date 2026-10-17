@@ -129,10 +129,20 @@ function normalizeNiche(niche?: string): string {
 }
 
 export function sourceSupportsNiche(source: SourceDescriptor, niche: string): boolean {
-  if (source.searchable) return true;
+  // A generic Web Search source can accept arbitrary product niches. Browser
+  // adapters remain limited to the categories and keywords explicitly
+  // registered for their approved host; being searchable only means that the
+  // adapter accepts a bounded query within that declared scope.
+  if (source.type === "web-search" && source.searchable) return true;
   if (source.supportedCategories.includes(niche)) return true;
   const terms = niche.split(/[^a-z0-9]+/).filter(Boolean);
   return terms.some((term) => source.nicheKeywords.includes(term));
+}
+
+export function isSearchDiscoverySource(sourceId: string): boolean {
+  return researchSources.some(
+    (source) => source.id === sourceId && source.type === "web-search",
+  );
 }
 
 export function listCompatibleResearchSources(

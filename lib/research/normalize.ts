@@ -10,6 +10,7 @@ export type RawProductRecord = Readonly<{
   sourceUrl?: string | null;
   imageUrl?: string | null;
   collectedAt?: string;
+  evidenceConfidence?: "high" | "medium" | "low";
 }>;
 
 export function normalizeWhitespace(value: string): string {
@@ -65,6 +66,7 @@ export function normalizeProduct(
   const category = optionalText(raw.category)?.toLowerCase() ?? null;
   const imageUrl = validUrl(raw.imageUrl);
   const collectedAt = raw.collectedAt ?? new Date().toISOString();
+  const evidenceConfidence = raw.evidenceConfidence ?? "high";
   const externalId =
     optionalText(raw.externalId) ?? toStableIdentifier(`${name}-${sourceUrl}`);
   const missingFields = [
@@ -91,7 +93,7 @@ export function normalizeProduct(
         value: name,
         sourceUrl,
         observedAt: collectedAt,
-        confidence: "high",
+        confidence: evidenceConfidence,
       },
       ...(price === null
         ? []
@@ -101,7 +103,7 @@ export function normalizeProduct(
               value: `${price.toFixed(2)} USD`,
               sourceUrl,
               observedAt: collectedAt,
-              confidence: "high" as const,
+              confidence: evidenceConfidence,
             },
           ]),
       ...(description === null
@@ -175,11 +177,15 @@ function nicheTerms(niche: string): string[] {
 export function productMatchesNiche(product: ProductCandidate, niche: string): boolean {
   const terms = nicheTerms(niche);
   if (terms.length === 0) return false;
-  const searchableText = [product.name, product.category, product.description]
+  const searchableText = [product.name, product.description, product.category]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  return terms.some((term) => searchableText.includes(term));
+  // A free-form discovery result has no category (and cannot satisfy an
+  // unobserved request term). For every candidate, each meaningful requested
+  // term must be present in observed name, description, or source category;
+  // matching only a generic modifier such as "wireless" is not enough.
+  return terms.every((term) => searchableText.includes(term));
 }
 
 export function filterProductsByNiche(

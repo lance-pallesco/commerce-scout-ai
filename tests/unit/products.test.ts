@@ -45,14 +45,9 @@ describe("product normalization", () => {
 
   it("rejects candidates whose observed text does not match the requested niche", () => {
     const products = collectFixtureProducts({ niche: "skincare", limit: 10 }).products;
-    expect(filterProductsByNiche(products, "skincare serum").map((product) => product.name)).toEqual(
-      expect.arrayContaining([
-        "Niacinamide 10% Barrier Serum",
-        "Gentle Oat Cream Cleanser",
-        "Mineral SPF 50 Travel Stick",
-        "Mystery Botanical Toner",
-      ]),
-    );
+    expect(filterProductsByNiche(products, "skincare serum").map((product) => product.name)).toEqual([
+      "Niacinamide 10% Barrier Serum",
+    ]);
     expect(filterProductsByNiche(products, "wireless earbuds")).toEqual([]);
   });
 });

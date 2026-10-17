@@ -37,16 +37,24 @@ export class WebDiscoveryError extends Error {
     | "WEB_SEARCH_NO_RESULTS"
     | "WEB_SEARCH_URL_REJECTED";
   readonly httpStatus?: number;
+  readonly searchUses?: number;
+  readonly estimatedCostUsd?: number;
 
   constructor(
     code: WebDiscoveryError["code"],
     message: string,
-    options: Readonly<{ httpStatus?: number }> = {},
+    options: Readonly<{
+      httpStatus?: number;
+      searchUses?: number;
+      estimatedCostUsd?: number;
+    }> = {},
   ) {
     super(message);
     this.name = "WebDiscoveryError";
     this.code = code;
     this.httpStatus = options.httpStatus;
+    this.searchUses = options.searchUses;
+    this.estimatedCostUsd = options.estimatedCostUsd;
   }
 }
 
@@ -88,6 +96,14 @@ function collectSearchResults(content: unknown): { results: SearchResult[]; sear
     }
   }
   return { results, searchUses };
+}
+
+function usageSearchUses(usage: unknown): number | null {
+  const usageRecord = asRecord(usage);
+  const serverToolUse = asRecord(usageRecord?.server_tool_use);
+  const value = serverToolUse?.web_search_requests;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
 }
 
 function searchToolErrorCode(content: unknown): string | null {
@@ -259,17 +275,26 @@ export async function discoverProductsWithWebSearch(input: Readonly<{
     throw new WebDiscoveryError("WEB_SEARCH_INVALID_RESPONSE", "Anthropic Web Search returned invalid JSON.");
   }
   const parsed = asRecord(payload);
+  const extracted = collectSearchResults(parsed?.content);
+  const searchUses = Math.min(
+    maxUses,
+    usageSearchUses(parsed?.usage) ?? extracted.searchUses,
+  );
+  const estimatedCostUsd = estimateCost(searchUses, parsed?.usage);
   const toolError = searchToolErrorCode(parsed?.content);
   if (toolError) {
     throw new WebDiscoveryError(
       "WEB_SEARCH_TOOL_FAILED",
       `Anthropic Web Search returned a safe tool error (${toolError}).`,
+      { searchUses, estimatedCostUsd },
     );
   }
-  const extracted = collectSearchResults(parsed?.content);
-  const searchUses = Math.min(maxUses, extracted.searchUses);
   if (searchUses <= 0 || extracted.results.length === 0) {
-    throw new WebDiscoveryError("WEB_SEARCH_NO_RESULTS", "Anthropic Web Search returned no usable product results.");
+    throw new WebDiscoveryError(
+      "WEB_SEARCH_NO_RESULTS",
+      "Anthropic Web Search returned no usable product results.",
+      { searchUses, estimatedCostUsd },
+    );
   }
 
   const products: ProductCandidate[] = [];
@@ -292,9 +317,12 @@ export async function discoverProductsWithWebSearch(input: Readonly<{
         externalId: toStableIdentifier(sourceUrl.toString()),
         name: title,
         description: snippet,
-        category: input.niche,
+        // Search results do not provide a dependable product category field.
+        // Never turn the request itself into observed category evidence.
+        category: null,
         price: parsePrice(evidenceText),
         sourceUrl: sourceUrl.toString(),
+        evidenceConfidence: "medium",
         collectedAt: new Date().toISOString(),
       },
       "anthropic-web-discovery",
@@ -311,7 +339,7 @@ export async function discoverProductsWithWebSearch(input: Readonly<{
   return {
     products: filtered,
     searchUses,
-    estimatedCostUsd: estimateCost(searchUses, parsed?.usage),
+    estimatedCostUsd,
     observedUrlCount: extracted.results.length,
     rejectedUrlCount,
   };
