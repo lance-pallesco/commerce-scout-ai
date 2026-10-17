@@ -571,6 +571,40 @@ describe("research MCP tools", () => {
     expect(result).toMatchObject({ status: "completed", candidates, estimatedCostUsd: 0.03 });
   });
 
+  it("reports a successful-subtype SDK API error without treating it as a missing report", async () => {
+    const events: AgentExecutionEvent[] = [];
+    const result = await runResearchAgent({
+      request,
+      config,
+      queryExecutor: async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          terminal_reason: "api_error",
+          api_error_status: 529,
+          total_cost_usd: 0,
+          num_turns: 1,
+          result: "Raw SDK error text must not be persisted.",
+        } as unknown as SDKMessage;
+      },
+      onEvent: (event) => {
+        events.push(event);
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      errorCode: "AGENT_API_ERROR",
+      sanitizedErrorMessage: "Claude returned an API error before research tools could run.",
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "agent_terminal_result",
+      detail: "success (error); structured output missing; 1 turns; terminal reason api_error; Anthropic HTTP 529; 0.0000 USD estimated",
+    }));
+    expect(events.some((event) => event.detail?.includes("Raw SDK error text"))).toBe(false);
+  });
+
   it("retains an SDK terminal error category when the single-shot iterator throws afterward", async () => {
     const result = await runResearchAgent({
       request,

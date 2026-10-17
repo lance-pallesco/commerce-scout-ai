@@ -84,6 +84,9 @@ export class AgentExecutionError extends Error {
     | "AGENT_MAX_TURNS"
     | "AGENT_MAX_BUDGET"
     | "AGENT_NO_PROGRESS"
+    | "AGENT_API_ERROR"
+    | "AGENT_MODEL_ERROR"
+    | "AGENT_SETUP_FAILED"
     | "AGENT_EXECUTION_FAILED";
 
   constructor(code: AgentExecutionError["code"], message: string) {
@@ -106,6 +109,30 @@ function userPrompt(request: ResearchRequest): string {
 
 function classifyResult(result: SDKResultMessage): AgentExecutionError | null {
   if (result.subtype === "success" && !result.is_error) return null;
+  if (result.subtype === "success" && result.is_error) {
+    if (result.terminal_reason === "api_error") {
+      return new AgentExecutionError(
+        "AGENT_API_ERROR",
+        "Claude returned an API error before research tools could run.",
+      );
+    }
+    if (result.terminal_reason === "model_error") {
+      return new AgentExecutionError(
+        "AGENT_MODEL_ERROR",
+        "Claude returned a model error before research tools could run.",
+      );
+    }
+    if (result.terminal_reason === "turn_setup_failed") {
+      return new AgentExecutionError(
+        "AGENT_SETUP_FAILED",
+        "Claude could not set up this research turn before research tools could run.",
+      );
+    }
+    return new AgentExecutionError(
+      "AGENT_EXECUTION_FAILED",
+      "Claude returned an execution error before research tools could run.",
+    );
+  }
   if (result.subtype === "error_max_turns") {
     return new AgentExecutionError("AGENT_MAX_TURNS", "Research stopped after reaching its turn limit.");
   }
@@ -145,6 +172,30 @@ function validateReport(
   }
 
   return report.data;
+}
+
+function terminalResultDetails(result: SDKResultMessage): string[] {
+  const details = [
+    `${result.subtype}${result.is_error ? " (error)" : ""}`,
+    `structured output ${"structured_output" in result && result.structured_output !== undefined ? "received" : "missing"}`,
+    `${result.num_turns} turns`,
+  ];
+  if (result.subtype === "success" && result.terminal_reason) {
+    details.push(`terminal reason ${result.terminal_reason}`);
+  }
+  if (
+    result.subtype === "success" &&
+    typeof result.api_error_status === "number" &&
+    Number.isInteger(result.api_error_status) &&
+    result.api_error_status >= 100 &&
+    result.api_error_status <= 599
+  ) {
+    details.push(`Anthropic HTTP ${result.api_error_status}`);
+  }
+  if (Number.isFinite(result.total_cost_usd)) {
+    details.push(`${result.total_cost_usd.toFixed(4)} USD estimated`);
+  }
+  return details;
 }
 
 const SEARCH_DISCOVERY_LIMITATION =
@@ -300,15 +351,7 @@ export async function runResearchAgent(
         await emit({
           type: "agent_terminal_result",
           at: new Date().toISOString(),
-          detail: [
-            `${message.subtype}; structured output ${hasStructuredOutput ? "received" : "missing"}`,
-            `${message.num_turns} turns`,
-            Number.isFinite(message.total_cost_usd)
-              ? `${message.total_cost_usd.toFixed(4)} USD estimated`
-              : undefined,
-          ]
-            .filter(Boolean)
-            .join("; "),
+          detail: terminalResultDetails(message).join("; "),
         });
         if (hasStructuredOutput) {
           await emit({ type: "agent_structured_output_received", at: new Date().toISOString() });
